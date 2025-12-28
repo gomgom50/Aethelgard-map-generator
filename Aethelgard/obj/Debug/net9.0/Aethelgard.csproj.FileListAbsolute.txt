@@ -27,3 +27,4 @@ C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.pdb
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.genruntimeconfig.cache
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\ref\Aethelgard.dll
+C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.sourcelink.json
