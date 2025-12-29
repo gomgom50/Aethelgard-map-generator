@@ -16,15 +16,14 @@ class Program
     private static bool _isDrifting = false;
     private static bool _enablePhysics = false;
 
+    // Planet configuration
+    private static PlanetConfig _planetConfig = new PlanetConfig();
+
     static void Main(string[] args)
     {
         // 1. Initialization
         const int screenWidth = 1280;
         const int screenHeight = 720;
-
-        // 2:1 aspect ratio for proper equirectangular projection (sphere mapping)
-        const int mapWidth = 1024;
-        const int mapHeight = 512;
 
         Raylib.InitWindow(screenWidth, screenHeight, "Aethelgard World Engine");
         Raylib.SetTargetFPS(60);
@@ -32,10 +31,10 @@ class Program
         // 2. Setup ImGui
         rlImGui.Setup(true);
 
-        // 3. Simulation & Systems
-        WorldMap worldMap = new WorldMap(mapWidth, mapHeight);
+        // 3. Simulation & Systems - use PlanetConfig
+        WorldMap worldMap = new WorldMap(_planetConfig);
         MapRenderer renderer = new MapRenderer();
-        renderer.Initialize(mapWidth, mapHeight);
+        renderer.Initialize(worldMap.Width, worldMap.Height);
 
         // Map Viewport Logic - 2:1 aspect ratio
         Rectangle mapViewport = new Rectangle(50, 50, 700, 350);
@@ -44,9 +43,15 @@ class Program
         float brushStrength = 0.05f;
         int brushRadius = 5;
 
+        // State tracking for optimization
+        MapRenderer.RenderMode lastMode = renderer.CurrentMode;
+        float lastNoiseScale = 0.0125f;
+
         // Main Loop
         while (!Raylib.WindowShouldClose())
         {
+            bool mapDirty = false;
+
             // --- INPUT HANDLING ---
             // Note: ImGui handles its own input. blocking logic usually happens if !ImGui.GetIO().WantCaptureMouse
             if (!ImGui.GetIO().WantCaptureMouse)
@@ -69,7 +74,7 @@ class Program
                         var cmd = new HeightmapBrushCommand(worldMap, mapX, mapY, brushStrength, brushRadius);
                         CommandManager.Instance.ExecuteCommand(cmd);
 
-                        // Mark renderer as dirty? For now just update every frame
+                        mapDirty = true;
                     }
                 }
             }
@@ -78,10 +83,26 @@ class Program
             if (Raylib.IsKeyPressed(KeyboardKey.Z)) // Simple shortcut
             {
                 CommandManager.Instance.Undo();
+                mapDirty = true;
             }
 
             // --- RENDER UPDATE ---
-            renderer.Update(worldMap);
+            // Optimization: Only update texture if map changed, mode changed, or relevant settings changed
+            if (_isDrifting) mapDirty = true; // Always update during simulation
+
+            // Check if noise scale changed (only matters for DebugNoise)
+            if (_plateSettings != null && Math.Abs(_plateSettings.DistortionScale - lastNoiseScale) > 0.0001f)
+            {
+                if (renderer.CurrentMode == MapRenderer.RenderMode.DebugNoise) mapDirty = true;
+                lastNoiseScale = _plateSettings.DistortionScale;
+                renderer.NoiseScale = lastNoiseScale;
+            }
+
+            if (mapDirty || renderer.CurrentMode != lastMode)
+            {
+                renderer.Update(worldMap);
+                lastMode = renderer.CurrentMode;
+            }
 
             // --- DRAWING ---
             Raylib.BeginDrawing();
@@ -95,9 +116,31 @@ class Program
             rlImGui.Begin();
 
             ImGui.Begin("Simulation Controller");
-            ImGui.Text($"Map Size: {worldMap.Width}x{worldMap.Height}");
+            ImGui.Text($"Planet: {worldMap.Config}");
+            ImGui.Text($"Hex Tiles: {worldMap.Topology.TileCount} ({worldMap.Topology.PentagonCount} pentagons)");
 
             ImGui.Separator();
+
+            // ... (rest of UI) ...
+
+            // In "Tectonic Controls" window (later in file), we need to ensure mapDirty is set on Generate
+            // Use a flag? The ImGui code is below.
+            // We can't access `mapDirty` inside the UI code block below easily if it's a huge method.
+            // Wait, this is all inside `Main`. So `mapDirty` is available!
+            // I need to make sure the UI code below sets `mapDirty` when buttons are clicked.
+
+            // Re-pasting the UI generation code to inject mapDirty=true is risky if I don't see it all.
+            // I replaced lines 46-100+ above.
+            // The UI code *starts* at line 94 in original.
+            // My replacement overlaps the start of UI.
+            // I need to continue the replacement to cover button clicks if possible.
+            // But Button clicks are further down (line 188).
+
+            // Strategy: I will replace the top loop part. 
+            // For the buttons down below, I will do a separate replacement to add `mapDirty = true;`.
+
+            /* Continuing replacement for top part */
+
             ImGui.Text("Brush Settings");
             ImGui.SliderFloat("Strength", ref brushStrength, 0.001f, 0.5f);
             ImGui.SliderInt("Radius", ref brushRadius, 1, 50);
@@ -112,6 +155,41 @@ class Program
             if (ImGui.Button("Undo (Z)"))
             {
                 CommandManager.Instance.Undo();
+            }
+
+            ImGui.End();
+
+            // Planet Configuration Panel
+            ImGui.Begin("Planet Configuration");
+
+            float radius = _planetConfig.RadiusKm;
+            if (ImGui.SliderFloat("Radius (km)", ref radius, 500f, 20000f, "%.0f"))
+            {
+                _planetConfig.RadiusKm = radius;
+            }
+            ImGui.Text($"Resolution: {_planetConfig.Width}x{_planetConfig.Height}px");
+
+            int hexRes = _planetConfig.HexResolution;
+            if (ImGui.SliderInt("Hex Resolution", ref hexRes, 8, 64))
+            {
+                _planetConfig.HexResolution = hexRes;
+            }
+            ImGui.Text($"Hex Tiles: {_planetConfig.HexTileCount}");
+
+            int seed = _planetConfig.Seed;
+            if (ImGui.InputInt("Seed", ref seed))
+            {
+                _planetConfig.Seed = seed;
+            }
+
+            ImGui.Separator();
+            if (ImGui.Button("Generate New Planet"))
+            {
+                // Create new world with current config
+                worldMap = new WorldMap(_planetConfig);
+                renderer.Dispose();
+                renderer = new MapRenderer();
+                renderer.Initialize(worldMap.Width, worldMap.Height);
             }
 
             ImGui.End();
@@ -163,6 +241,16 @@ class Program
             ImGui.SliderFloat("Ocean Depth", ref _plateSettings.OceanicLevel, -2.0f, -0.1f);
 
             ImGui.Separator();
+            ImGui.Text("Hex Organic Settings (HexOrganic mode)");
+            ImGui.SliderFloat("Ruggedness", ref _plateSettings.Ruggedness, 0.0f, 1.0f);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Controls border jaggedness. 0=smooth, 1=very jagged");
+
+            ImGui.SliderFloat("Boundary Threshold", ref _plateSettings.BoundaryThreshold, 0.0f, 1.0f);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Dot product threshold for convergent/divergent classification");
+
+            ImGui.Separator();
             ImGui.Text("Projection");
             ImGui.Checkbox("Spherical Projection", ref _plateSettings.UseSphericalProjection);
             if (ImGui.IsItemHovered())
@@ -178,6 +266,50 @@ class Program
 
             if (ImGui.RadioButton("Feature Types (Debug)", renderer.CurrentMode == MapRenderer.RenderMode.FeatureTypes))
                 renderer.CurrentMode = MapRenderer.RenderMode.FeatureTypes;
+
+            ImGui.Separator();
+            ImGui.Text("Tectonic Debug");
+            if (ImGui.RadioButton("Boundary Types", renderer.CurrentMode == MapRenderer.RenderMode.BoundaryTypes))
+                renderer.CurrentMode = MapRenderer.RenderMode.BoundaryTypes;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Red=Convergent, Blue=Divergent, Yellow=Transform");
+
+            if (ImGui.RadioButton("Plate Velocity", renderer.CurrentMode == MapRenderer.RenderMode.PlateVelocity))
+                renderer.CurrentMode = MapRenderer.RenderMode.PlateVelocity;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Hue shows drift direction, saturation shows speed");
+
+            if (ImGui.RadioButton("Continental/Oceanic", renderer.CurrentMode == MapRenderer.RenderMode.Continental))
+                renderer.CurrentMode = MapRenderer.RenderMode.Continental;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Green=Continental crust, Blue=Oceanic crust");
+
+            if (ImGui.RadioButton("Microplates (Cratons)", renderer.CurrentMode == MapRenderer.RenderMode.Microplates))
+                renderer.CurrentMode = MapRenderer.RenderMode.Microplates;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Shows internal continental subdivisions. White lines are ancient boundaries.");
+
+            if (ImGui.RadioButton("Oceanic Crust Age", renderer.CurrentMode == MapRenderer.RenderMode.CrustAge))
+                renderer.CurrentMode = MapRenderer.RenderMode.CrustAge;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Shows oceanic crust age. Red=New(Ridge), Blue=Old(Abyssal).");
+
+            if (ImGui.RadioButton("Debug Noise", renderer.CurrentMode == MapRenderer.RenderMode.DebugNoise))
+                renderer.CurrentMode = MapRenderer.RenderMode.DebugNoise;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Grayscale FBM noise used for flood fill distortion");
+
+            ImGui.Separator();
+            ImGui.Text("Hex Grid Debug");
+            if (ImGui.RadioButton("Hex Tiles", renderer.CurrentMode == MapRenderer.RenderMode.HexTiles))
+                renderer.CurrentMode = MapRenderer.RenderMode.HexTiles;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Show hex tiles (magenta = pentagons)");
+
+            if (ImGui.RadioButton("Hex Faces (20)", renderer.CurrentMode == MapRenderer.RenderMode.HexFaces))
+                renderer.CurrentMode = MapRenderer.RenderMode.HexFaces;
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Show 20 icosahedron faces (white = pentagons)");
 
             ImGui.End();
 

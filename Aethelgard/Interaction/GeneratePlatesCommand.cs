@@ -50,6 +50,10 @@ namespace Aethelgard.Interaction
             {
                 GenerateSupercontinent(rnd);
             }
+            else if (_settings.Mode == GenerationMode.HexOrganic)
+            {
+                GenerateHexPlates(rnd);
+            }
         }
 
         private void GenerateSupercontinent(Random rnd)
@@ -562,6 +566,376 @@ namespace Aethelgard.Interaction
             }
 
             return adj;
+        }
+
+        /// <summary>
+        /// Hex-based Dijkstra flood fill with noise-weighted costs.
+        /// Creates organic, non-geometric plate shapes using the hex topology.
+        /// </summary>
+        private void GenerateHexPlates(Random rnd)
+        {
+            var topology = _map.Topology;
+            int tileCount = topology.TileCount;
+            int plateCount = _settings.TargetPlateCount;
+            float ruggedness = _settings.Ruggedness;
+            float boundaryThreshold = _settings.BoundaryThreshold;
+
+            // 1. Clear existing plates
+            _map.Lithosphere.Plates.Clear();
+
+            // Reset hex tile data
+            for (int i = 0; i < tileCount; i++)
+            {
+                _map.TilePlateId[i] = -1;
+                _map.TileBoundary[i] = BoundaryType.None;
+                _map.TileDistanceToSeed[i] = float.MaxValue;
+            }
+
+            // 2. Pick random seed tiles
+            List<Plate> plates = new List<Plate>();
+            List<int> seedTiles = new List<int>();
+
+            for (int i = 0; i < plateCount && i < tileCount; i++)
+            {
+                int candidate = rnd.Next(0, tileCount);
+                int attempts = 0;
+                while (seedTiles.Contains(candidate) && attempts < 100)
+                {
+                    candidate = rnd.Next(0, tileCount);
+                    attempts++;
+                }
+
+                seedTiles.Add(candidate);
+
+                int plateId = i + 1;
+                var (lat, lon) = topology.GetTileCenter(candidate);
+                var (px, py) = SphericalMath.LatLonToPixel(lon, lat, _map.Width, _map.Height);
+                Color color = new Color(rnd.Next(50, 255), rnd.Next(50, 255), rnd.Next(50, 255), 255);
+
+                Plate plate = new Plate(plateId, new Vector2(px, py), color);
+                plate.Type = rnd.NextDouble() < _settings.ContinentalRatio ? PlateType.Continental : PlateType.Oceanic;
+                plate.BaseRock = plate.Type == PlateType.Continental ? RockType.Granite : RockType.Basalt;
+                plate.Velocity = new Vector2((float)(rnd.NextDouble() * 2 - 1), (float)(rnd.NextDouble() * 2 - 1));
+                plate.BaseElevation = plate.Type == PlateType.Continental
+                    ? 0.3f + (float)rnd.NextDouble() * 0.9f
+                    : -1.5f + (float)rnd.NextDouble() * 0.7f;
+
+                plates.Add(plate);
+                _map.Lithosphere.RegisterPlate(plate);
+
+                _map.TilePlateId[candidate] = plateId;
+                _map.TileDistanceToSeed[candidate] = 0f;
+                plate.TileIds.Add(candidate);
+            }
+
+            // 3. Dijkstra Flood Fill with noise-weighted costs
+            var pq = new SortedSet<(float cost, int tile, int plate)>(
+                Comparer<(float cost, int tile, int plate)>.Create((a, b) =>
+                {
+                    int cmp = a.cost.CompareTo(b.cost);
+                    return cmp != 0 ? cmp : a.tile.CompareTo(b.tile);
+                })
+            );
+
+            for (int i = 0; i < seedTiles.Count; i++)
+                pq.Add((0f, seedTiles[i], plates[i].Id));
+
+            float noiseOffsetX = (float)rnd.NextDouble() * 1000f;
+            float noiseOffsetY = (float)rnd.NextDouble() * 1000f;
+
+            while (pq.Count > 0)
+            {
+                var (cost, currentTile, plateId) = pq.Min;
+                pq.Remove(pq.Min);
+
+                if (_map.TilePlateId[currentTile] != -1 && _map.TilePlateId[currentTile] != plateId)
+                    continue;
+
+                var neighbors = topology.GetNeighbors(currentTile);
+                for (int i = 0; i < neighbors.Length; i++)
+                {
+                    int neighbor = neighbors[i];
+                    if (_map.TilePlateId[neighbor] != -1)
+                        continue;
+
+                    var (lat, lon) = topology.GetTileCenter(neighbor);
+                    float scale = _settings.DistortionScale;
+                    // Domain Warped Noise: -1 to 1 (approx)
+                    float noise = SimpleNoise.GetDomainWarpedNoise((lon + noiseOffsetX) * scale, (lat + noiseOffsetY) * scale, 3, 4.0f);
+
+                    // Normalize to 0..1
+                    float noise01 = (noise + 1.0f) * 0.5f;
+                    noise01 = Math.Clamp(noise01, 0f, 1f);
+
+                    // Apply DistortionStrength: High strength = High cost for "peaks", forcing paths into "valleys"
+                    // Base cost is 1.0. 
+                    // If Strength is 20, Peak cost is 21, Valley cost is 1.
+                    // This ratio forces the flood fill to follow the valleys (organic shapes).
+                    float strength = _settings.DistortionStrength;
+                    float friction = 1.0f + (noise01 * noise01) * strength; // Square it to emphasize peaks further
+
+                    float newCost = cost + friction;
+
+                    _map.TilePlateId[neighbor] = plateId;
+                    _map.TileDistanceToSeed[neighbor] = newCost;
+                    _map.Lithosphere.Plates[plateId].TileIds.Add(neighbor);
+
+                    pq.Add((newCost, neighbor, plateId));
+                }
+            }
+
+            // 4. Classify Boundaries
+            ClassifyHexBoundaries(plates, boundaryThreshold);
+
+            // 5. Generate Microplates (internal subdivision of continental plates)
+            GenerateMicroplates(plates, rnd);
+
+            // 6. Calculate Crust Age (for oceanic depth)
+            CalculateCrustAge();
+
+            // 7. Sync to pixel grid
+            SyncHexToPixelGrid();
+        }
+
+        private void ClassifyHexBoundaries(List<Plate> plates, float threshold)
+        {
+            var topology = _map.Topology;
+            for (int tileId = 0; tileId < topology.TileCount; tileId++)
+            {
+                int plateId = _map.TilePlateId[tileId];
+                if (plateId == -1) continue;
+
+                var neighbors = topology.GetNeighbors(tileId);
+                for (int i = 0; i < neighbors.Length; i++)
+                {
+                    int neighborPlateId = _map.TilePlateId[neighbors[i]];
+                    if (neighborPlateId == -1 || neighborPlateId == plateId)
+                        continue;
+
+                    var plateA = _map.Lithosphere.Plates[plateId];
+                    var plateB = _map.Lithosphere.Plates[neighborPlateId];
+                    Vector2 relVelocity = plateA.Velocity - plateB.Velocity;
+
+                    var (latA, lonA) = topology.GetTileCenter(tileId);
+                    var (latB, lonB) = topology.GetTileCenter(neighbors[i]);
+                    Vector2 direction = new Vector2(lonB - lonA, latB - latA);
+                    if (direction.LengthSquared() > 0.0001f)
+                        direction = Vector2.Normalize(direction);
+
+                    float pressure = Vector2.Dot(relVelocity, direction);
+
+                    if (pressure > threshold)
+                        _map.TileBoundary[tileId] = BoundaryType.Convergent;
+                    else if (pressure < -threshold)
+                        _map.TileBoundary[tileId] = BoundaryType.Divergent;
+                    else if (relVelocity.LengthSquared() > 0.1f)
+                        _map.TileBoundary[tileId] = BoundaryType.Transform;
+                    break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Subdivides continental plates into microplates (ancient cratons).
+        /// Creates internal regions and marks their boundaries for ancient mountain ranges.
+        /// </summary>
+        private void GenerateMicroplates(List<Plate> plates, Random rnd)
+        {
+            var topology = _map.Topology;
+            int microplateId = 0;
+            int microplatesPerContinent = Math.Max(3, _settings.MicroPlateFactor);
+
+            // Process each continental plate
+            foreach (var plate in plates)
+            {
+                if (plate.Type != PlateType.Continental) continue;
+                if (plate.TileIds.Count < microplatesPerContinent * 3) continue; // Too small
+
+                // Pick random seed tiles within this plate
+                var plateTiles = plate.TileIds.ToList();
+                var microSeeds = new List<int>();
+                int seedCount = Math.Min(microplatesPerContinent, plateTiles.Count / 10);
+
+                for (int i = 0; i < seedCount; i++)
+                {
+                    int attempt = 0;
+                    int seed = plateTiles[rnd.Next(plateTiles.Count)];
+
+                    // Ensure minimum distance between micro seeds
+                    while (attempt++ < 20)
+                    {
+                        bool tooClose = false;
+                        foreach (int existing in microSeeds)
+                        {
+                            float dist = _map.TileDistanceToSeed[seed];
+                            if (dist < 5) // Arbitrary min distance
+                            {
+                                tooClose = true;
+                                break;
+                            }
+                        }
+                        if (!tooClose) break;
+                        seed = plateTiles[rnd.Next(plateTiles.Count)];
+                    }
+
+                    microSeeds.Add(seed);
+                    _map.TileMicroplateId[seed] = microplateId++;
+                }
+
+                // Internal flood fill for microplates (restricted to this plate)
+                var pq = new SortedSet<(float cost, int tile, int microId)>(
+                    Comparer<(float, int, int)>.Create((a, b) =>
+                    {
+                        int cmp = a.Item1.CompareTo(b.Item1);
+                        return cmp != 0 ? cmp : a.Item2.CompareTo(b.Item2);
+                    }));
+
+                foreach (int seed in microSeeds)
+                {
+                    pq.Add((0, seed, _map.TileMicroplateId[seed]));
+                }
+
+                while (pq.Count > 0)
+                {
+                    var (cost, tile, mId) = pq.Min;
+                    pq.Remove(pq.Min);
+
+                    if (_map.TileMicroplateId[tile] != -1 && _map.TileMicroplateId[tile] != mId)
+                        continue;
+
+                    var neighbors = topology.GetNeighbors(tile);
+                    foreach (int neighbor in neighbors)
+                    {
+                        // Only expand within this plate
+                        if (_map.TilePlateId[neighbor] != plate.Id) continue;
+                        if (_map.TileMicroplateId[neighbor] != -1) continue;
+
+                        var (lat, lon) = topology.GetTileCenter(neighbor);
+                        // Use Domain Warping for consistent style
+                        float noise = SimpleNoise.GetDomainWarpedNoise(lon * 0.08f, lat * 0.08f, 2, 4.0f);
+                        float newCost = cost + 1.0f + noise * 0.5f;
+
+                        _map.TileMicroplateId[neighbor] = mId;
+                        pq.Add((newCost, neighbor, mId));
+                    }
+                }
+            }
+
+            // Detect microplate boundaries (ancient orogeny zones)
+            for (int tileId = 0; tileId < topology.TileCount; tileId++)
+            {
+                int mId = _map.TileMicroplateId[tileId];
+                if (mId == -1) continue;
+
+                var neighbors = topology.GetNeighbors(tileId);
+                foreach (int neighbor in neighbors)
+                {
+                    int neighborMId = _map.TileMicroplateId[neighbor];
+                    // Same plate but different microplate = ancient boundary
+                    if (neighborMId != -1 && neighborMId != mId &&
+                        _map.TilePlateId[tileId] == _map.TilePlateId[neighbor])
+                    {
+                        _map.TileMicroBoundary[tileId] = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        private void CalculateCrustAge()
+        {
+            var topology = _map.Topology;
+            var queue = new Queue<int>();
+            var visited = new bool[topology.TileCount];
+
+            // 1. Identify Ridge Tiles (Divergent Boundaries)
+            for (int i = 0; i < topology.TileCount; i++)
+            {
+                if (_map.TilePlateId[i] == -1) continue;
+
+                if (_map.TileBoundary[i] == BoundaryType.Divergent)
+                {
+                    _map.TileAge[i] = 0f;
+                    queue.Enqueue(i);
+                    visited[i] = true;
+                }
+                else
+                {
+                    _map.TileAge[i] = 1.0f; // Default to old
+                }
+            }
+
+            // 2. BFS Propagate Age
+            // We propagate "distance from ridge" which equals age
+            while (queue.Count > 0)
+            {
+                int current = queue.Dequeue();
+                float currentAge = _map.TileAge[current];
+
+                foreach (int neighbor in topology.GetNeighbors(current))
+                {
+                    if (_map.TilePlateId[neighbor] == -1) continue;
+
+                    // Only propagate within same plate or if it's a valid continued spreading zone
+                    // Simplification: Propagate to any unvisited neighbor of the SAME plate
+                    if (_map.TilePlateId[neighbor] == _map.TilePlateId[current])
+                    {
+                        if (!visited[neighbor])
+                        {
+                            // Increment age
+                            // 0.05 per step implies ~20 steps to reach "max age" 1.0
+                            // In a large map, this might need dynamic scaling, but linear is a good start
+                            float newAge = currentAge + 0.02f;
+                            if (newAge > 1.0f) newAge = 1.0f;
+
+                            _map.TileAge[neighbor] = newAge;
+                            visited[neighbor] = true;
+                            queue.Enqueue(neighbor);
+                        }
+                    }
+                }
+            }
+        }
+
+        private void SyncHexToPixelGrid()
+        {
+            int w = _map.Width;
+            int h = _map.Height;
+
+            Parallel.For(0, h, y =>
+            {
+                for (int x = 0; x < w; x++)
+                {
+                    int tileId = _map.GetHexTileAt(x, y);
+                    int plateId = _map.TilePlateId[tileId];
+                    _map.Lithosphere.PlateIdMap.Set(x, y, plateId);
+
+                    if (plateId != -1 && _map.Lithosphere.Plates.ContainsKey(plateId))
+                    {
+                        var plate = _map.Lithosphere.Plates[plateId];
+                        float noise = SimpleNoise.GetDomainWarpedNoise(x * 0.015f, y * 0.015f, 3, 4.0f); // swirly terrain
+
+                        float elev;
+                        if (plate.Type == PlateType.Oceanic)
+                        {
+                            // Oceanic Isostasy: Depth based on Age (Half-space cooling model approx)
+                            // New crust (age 0) = Shallow (-2.5km approx)
+                            // Old crust (age 1) = Deep (-5.0km approx)
+                            float age = _map.TileAge[tileId];
+                            float baseDepth = -2.5f - (MathF.Sqrt(age) * 3.0f); // -2.5 to -5.5
+                            elev = baseDepth + noise * 0.3f;
+                        }
+                        else
+                        {
+                            // Continental
+                            elev = plate.BaseElevation + noise * 0.4f;
+                        }
+
+                        _map.Elevation.Set(x, y, elev);
+                        _map.CrustThickness.Set(x, y, Math.Clamp(elev + 2.0f, 0.5f, 5.0f));
+                    }
+                }
+            });
         }
 
         public void Undo()

@@ -28,6 +28,17 @@ namespace Aethelgard.Simulation
         /// </summary>
         public float BaseElevation { get; set; } = 0f;
 
+        /// <summary>
+        /// Default rock type for this plate.
+        /// Oceanic = Basalt, Continental = Granite typically.
+        /// </summary>
+        public RockType BaseRock { get; set; } = RockType.Granite;
+
+        /// <summary>
+        /// Hex tile IDs owned by this plate (for hex-based flood fill).
+        /// </summary>
+        public List<int> TileIds { get; set; } = new List<int>();
+
         // Composite Tectonics Data
         // Stores the chunk of terrain that this plate "owns" and carries with it.
         public struct TerrainPixel

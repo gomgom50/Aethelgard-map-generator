@@ -83,5 +83,23 @@ namespace Aethelgard.Simulation
 
             return total; // Raw result, can be > 1 or < -1
         }
+
+        /// <summary>
+        /// Domain Warping - Displaces the coordinates using FBM before sampling noise.
+        /// Creates "swirly", fluid-like patterns ideal for organic plate boundaries.
+        /// </summary>
+        public static float GetDomainWarpedNoise(float x, float y, int octaves, float warpStrength = 4.0f)
+        {
+            // First layer of displacement
+            float qx = GetFBM(x, y, octaves);
+            float qy = GetFBM(x + 5.2f, y + 1.3f, octaves);
+
+            // Second layer (optional, but good for extra swirl)
+            float rx = GetFBM(x + 4.0f * qx + 1.7f, y + 4.0f * qy + 9.2f, octaves);
+            float ry = GetFBM(x + 4.0f * qx + 8.3f, y + 4.0f * qy + 2.8f, octaves);
+
+            // Final sample
+            return GetFBM(x + warpStrength * rx, y + warpStrength * ry, octaves);
+        }
     }
 }

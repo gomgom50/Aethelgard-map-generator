@@ -4,7 +4,8 @@ namespace Aethelgard.Interaction
     {
         Random,
         FromElevation, // Inverse Generation (Terrain -> Plates)
-        Supercontinent // Pangea Start (For Drift Simulation)
+        Supercontinent, // Pangea Start (For Drift Simulation)
+        HexOrganic     // Hex-based Dijkstra flood fill with noise (Gleba-style)
     }
 
     public class PlateGenerationSettings
@@ -28,5 +29,9 @@ namespace Aethelgard.Interaction
 
         // Projection
         public bool UseSphericalProjection = true; // Use spherical distance for realistic polar plates
+
+        // Hex-based organic flood fill settings (HexOrganic mode)
+        public float Ruggedness = 0.5f; // 0-1, noise weight for jagged borders
+        public float BoundaryThreshold = 0.3f; // Dot product threshold for convergent/divergent
     }
 }
