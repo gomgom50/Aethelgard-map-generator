@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Aethelgard")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+223188b79ada79e2631c3e0cfde262638e534109")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+84183ce679a3fa90fb94d1c0ae5aacac0a8a8fbc")]
 [assembly: System.Reflection.AssemblyProductAttribute("Aethelgard")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Aethelgard")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

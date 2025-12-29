@@ -25,5 +25,8 @@ namespace Aethelgard.Interaction
         public float ContinentalRatio = 0.4f; // 40% of plates are continental
         public float OceanicLevel = -1.0f; // Base Elevation for Oceanic
         public float ContinentalLevel = 0.1f; // Base Elevation for Continental
+
+        // Projection
+        public bool UseSphericalProjection = true; // Use spherical distance for realistic polar plates
     }
 }

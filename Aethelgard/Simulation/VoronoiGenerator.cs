@@ -17,10 +17,13 @@ namespace Aethelgard.Simulation
             public float Weight; // Power Diagram Weight
         }
 
-        public static void Generate(Lithosphere lithosphere, List<Plate> seeds, bool useWarping = true)
+        public static void Generate(Lithosphere lithosphere, List<Plate> seeds, bool useWarping = true, bool useSphericalDistance = false)
         {
             int w = lithosphere.PlateIdMap.Width;
             int h = lithosphere.PlateIdMap.Height;
+            _useSpherical = useSphericalDistance;
+            _mapWidth = w;
+            _mapHeight = h;
 
             PixelInfo[] bufferA = new PixelInfo[w * h];
             PixelInfo[] bufferB = new PixelInfo[w * h];
@@ -70,7 +73,7 @@ namespace Aethelgard.Simulation
                     {
                         int currentIdx = y * w + x;
                         PixelInfo bestPixel = source[currentIdx];
-                        float bestDist = GetWeightedDist(x, y, bestPixel, w);
+                        float bestDist = GetWeightedDist(x, y, bestPixel);
 
                         for (int dy = -1; dy <= 1; dy++)
                         {
@@ -88,7 +91,7 @@ namespace Aethelgard.Simulation
                                     PixelInfo neighbor = source[ny * w + nx];
                                     if (neighbor.PlateId != 0)
                                     {
-                                        float d = GetWeightedDist(x, y, neighbor, w);
+                                        float d = GetWeightedDist(x, y, neighbor);
                                         if (d < bestDist)
                                         {
                                             bestDist = d;
@@ -152,18 +155,36 @@ namespace Aethelgard.Simulation
             });
         }
 
-        private static float GetWeightedDist(int x, int y, PixelInfo p, int width)
+        // Static state for spherical calculations (shared across threads - read-only during Parallel.For)
+        private static bool _useSpherical;
+        private static int _mapWidth;
+        private static int _mapHeight;
+
+        private static float GetWeightedDist(int x, int y, PixelInfo p)
         {
             if (p.SeedX < -1000) return float.MaxValue;
 
-            float dx = Math.Abs(x - p.SeedX);
-            float dy = Math.Abs(y - p.SeedY);
+            if (_useSpherical)
+            {
+                // Use true spherical distance (Haversine)
+                float dist = SphericalMath.SphericalDistancePixels(x, y, p.SeedX, p.SeedY, _mapWidth, _mapHeight);
+                // Scale to pixel-like units (normalized spherical dist is 0 to PI)
+                // Multiply by height to get comparable pixel values
+                float scaledDist = dist * _mapHeight / (float)Math.PI;
+                return (scaledDist * scaledDist) - p.Weight;
+            }
+            else
+            {
+                // Original Euclidean distance
+                float dx = Math.Abs(x - p.SeedX);
+                float dy = Math.Abs(y - p.SeedY);
 
-            // Cylindrical Wrap for DX
-            if (dx > width / 2.0f) dx = width - dx;
+                // Cylindrical Wrap for DX
+                if (dx > _mapWidth / 2.0f) dx = _mapWidth - dx;
 
-            // Power Diagram: Dist^2 - Weight
-            return (dx * dx + dy * dy) - p.Weight;
+                // Power Diagram: Dist^2 - Weight
+                return (dx * dx + dy * dy) - p.Weight;
+            }
         }
     }
 }

@@ -211,7 +211,7 @@ namespace Aethelgard.Interaction
             var allPlates = new List<Plate>();
             allPlates.AddRange(landPlates);
             allPlates.AddRange(oceanPlates);
-            VoronoiGenerator.Generate(_map.Lithosphere, allPlates, false);
+            VoronoiGenerator.Generate(_map.Lithosphere, allPlates, false, _settings.UseSphericalProjection);
         }
 
         private Vector2 CalculateCentroid(List<(int X, int Y)> pixels)
@@ -275,7 +275,7 @@ namespace Aethelgard.Interaction
             }
 
             // 3. Run Initial Voronoi (Smooth / No Warp)
-            VoronoiGenerator.Generate(_map.Lithosphere, microPlates, false);
+            VoronoiGenerator.Generate(_map.Lithosphere, microPlates, false, _settings.UseSphericalProjection);
 
             // 4. Build Adjacency Graph & Merge
             MergePlates(microPlates, rnd);
@@ -294,35 +294,52 @@ namespace Aethelgard.Interaction
         {
             var plates = _map.Lithosphere.Plates.Values.ToList();
             int total = plates.Count;
+            int w = _map.Width;
+            int h = _map.Height;
+
+            // LATITUDE BIAS: Calculate plate "equatorial score" based on center Y
+            // Plates near poles (top/bottom 15%) are ALWAYS oceanic
+            // Other plates get weighted chance of being continental
+            float polarZone = 0.15f; // Top/bottom 15% is polar (always ocean)
+
+            // Sort plates by distance from equator (equatorial first)
+            var plateSorted = plates.OrderBy(p =>
+            {
+                float normalizedY = p.Center.Y / h;
+                return Math.Abs(normalizedY - 0.5f); // 0 at equator, 0.5 at poles
+            }).ToList();
+
             int continentalCount = (int)(total * _settings.ContinentalRatio);
+            int assigned = 0;
 
-            // Fisher-Yates shuffle to randomly pick continents
             for (int i = 0; i < total; i++)
             {
-                int k = rnd.Next(i, total);
-                var temp = plates[i];
-                plates[i] = plates[k];
-                plates[k] = temp;
-            }
+                var plate = plateSorted[i];
+                float normalizedY = plate.Center.Y / h;
+                float distFromEquator = Math.Abs(normalizedY - 0.5f); // 0 at equator, 0.5 at poles
 
-            // Assign type AND random base elevation per plate (ProcGenesis approach)
-            for (int i = 0; i < total; i++)
-            {
-                bool isCont = i < continentalCount;
-                plates[i].Type = isCont ? PlateType.Continental : PlateType.Oceanic;
+                // Force polar plates to be oceanic
+                bool isPolar = distFromEquator > (0.5f - polarZone); // Near top or bottom
 
-                // Random base elevation per plate (key to varied terrain!)
-                // Continental: 0.3 to 1.2 (above sea level, varied)
-                // Oceanic: -0.8 to -1.5 (below sea level, varied)
+                bool isCont = false;
+                if (!isPolar && assigned < continentalCount)
+                {
+                    // Weighted probability: closer to equator = higher chance
+                    // But since we sorted by distance, we just fill continental quota first
+                    isCont = true;
+                    assigned++;
+                }
+
+                plate.Type = isCont ? PlateType.Continental : PlateType.Oceanic;
+
+                // Random base elevation per plate
                 if (isCont)
-                    plates[i].BaseElevation = 0.3f + (float)rnd.NextDouble() * 0.9f;
+                    plate.BaseElevation = 0.3f + (float)rnd.NextDouble() * 0.9f;
                 else
-                    plates[i].BaseElevation = -1.5f + (float)rnd.NextDouble() * 0.7f;
+                    plate.BaseElevation = -1.5f + (float)rnd.NextDouble() * 0.7f;
             }
 
             // Apply to map: FinalElevation = PlateBase + PixelNoise
-            int w = _map.Width;
-            int h = _map.Height;
             var idMap = _map.Lithosphere.PlateIdMap;
             var elevation = _map.Elevation;
             var thickness = _map.CrustThickness;
