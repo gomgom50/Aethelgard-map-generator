@@ -31,8 +31,8 @@ class Program
         // ═══════════════════════════════════════════════════════════════
         int resolution = 50;
         int seed = 12345;
-        int renderWidth = 10800;   // Very high res for large subtiles
-        int renderHeight = 5400;
+        int renderWidth = 21600;   // Very high res for large subtiles
+        int renderHeight = 10800;
 
         // Current render mode
         int currentModeIndex = 0;
@@ -44,8 +44,9 @@ class Program
         float noiseStrength = 1.0f;
 
         // Subtile parameters (persistent for slider state)
-        float subtileWarpStrength = 0.15f;
-        float subtileNoiseScale = 0.05f;
+        float subtileWarpStrength = 0.015f;
+        float subtileNoiseScale = 35.7f;
+        float subtileDetailStrength = 100.0f;
         int subtileResolution = 4;
         bool showSubtileBorders = false;
         const float SubtileBorderMinZoom = 4.0f; // Only show borders at this zoom or higher
@@ -398,7 +399,7 @@ class Program
 
             bool subtileChanged = false;
 
-            if (ImGui.SliderFloat("Warp Strength", ref subtileWarpStrength, 0.0f, 0.5f, "%.2f"))
+            if (ImGui.SliderFloat("Warp Strength", ref subtileWarpStrength, 0.0f, 0.1f, "%.3f"))
             {
                 // Preview change but don't apply yet
             }
@@ -406,9 +407,16 @@ class Program
                 subtileChanged = true;
 
             // Scale is now in angular space - 0.01 = very smooth, 0.2 = detailed
-            if (ImGui.SliderFloat("Noise Frequency", ref subtileNoiseScale, 0.01f, 0.2f, "%.3f"))
+            if (ImGui.SliderFloat("Noise Frequency", ref subtileNoiseScale, 0.1f, 200.0f, "%.3f"))
             {
                 // Preview change but don't apply yet
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit())
+                subtileChanged = true;
+
+            if (ImGui.SliderFloat("Detail Strength", ref subtileDetailStrength, 0.0f, 200.0f, "%.1f"))
+            {
+                // Preview
             }
             if (ImGui.IsItemDeactivatedAfterEdit())
                 subtileChanged = true;
@@ -421,12 +429,14 @@ class Program
             {
                 map.Subtiles.ResolutionMultiplier = subtileResolution;
                 renderer.IsDirty = true;
+                renderer.GeometryDirty = true; // Topology changed
             }
 
             if (subtileChanged && map?.Subtiles != null)
             {
-                map.Subtiles.UpdateConfig(subtileNoiseScale, subtileWarpStrength);
-                renderer.IsDirty = true;
+                map.Subtiles.UpdateConfig(subtileNoiseScale, subtileWarpStrength, subtileDetailStrength);
+                renderer.IsDirty = true;       // Color update
+                renderer.GeometryDirty = true; // Warp update (Visual Grid)
             }
 
             // Subtile border overlay toggle
