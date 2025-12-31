@@ -21,10 +21,12 @@ C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.AssemblyInfoInputs.cache
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.AssemblyInfo.cs
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.csproj.CoreCompileInputs.cache
+C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.sourcelink.json
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.csproj.Up2Date
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.dll
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\refint\Aethelgard.dll
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.pdb
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.genruntimeconfig.cache
 C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\ref\Aethelgard.dll
-C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\obj\Debug\net9.0\Aethelgard.sourcelink.json
+C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\bin\Debug\net9.0\Content\Shaders\map_shader.fs
+C:\Users\Christoffer Mølck\RiderProjects\Aethelgard\Aethelgard\bin\Debug\net9.0\Content\Shaders\map_shader.vs

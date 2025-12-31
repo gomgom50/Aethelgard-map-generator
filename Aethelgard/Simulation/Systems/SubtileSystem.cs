@@ -141,8 +141,22 @@ namespace Aethelgard.Simulation.Systems
         /// </summary>
         public int GetParentTile(int subtileId)
         {
+            if (subtileId < 0 || subtileId >= _subtileToParent.Length) return -1;
             return _subtileToParent[subtileId];
         }
+
+        /// <summary>
+        /// Gets the center position of a subtile on the unit sphere.
+        /// </summary>
+        public Vector3 GetSubtileCenter(int subtileId)
+        {
+            return _microTopology.GetTilePosition(subtileId);
+        }
+
+        /// <summary>
+        /// Gets the total number of subtiles in the micro-topology.
+        /// </summary>
+        public int SubtileCount => _microTopology.TileCount;
 
         /// <summary>
         /// Gets the raw noise perturbation values at a position.
@@ -225,6 +239,17 @@ namespace Aethelgard.Simulation.Systems
             float detail = _warpNoise.GetNoise(newLon * _noiseScale * 2f, newLat * _noiseScale * 2f, 0);
 
             return blendedHeight + detail * 50f;
+        }
+
+        /// <summary>
+        /// Gets the blended elevation for a specific subtile ID.
+        /// Used for generating the Value Texture.
+        /// </summary>
+        public float GetSubtileElevation(int subtileId)
+        {
+            // Use the center of the subtile
+            Vector3 center = _microTopology.GetTilePosition(subtileId);
+            return GetBlendedElevation(center);
         }
 
         private static (float lat, float lon) UseCartesianToLatLon(Vector3 pos)
