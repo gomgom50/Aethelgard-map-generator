@@ -1,137 +1,139 @@
+using Aethelgard.Simulation.Core;
+using Aethelgard.Simulation.Generators;
+using Aethelgard.Simulation.Systems;
+
 namespace Aethelgard.Simulation
 {
     /// <summary>
-    /// The container for all world data layers.
-    /// Acts as the central "Database" for the simulation.
-    /// Uses dual-grid architecture: pixel grid for data, hex grid for adjacency.
+    /// Central world state container.
+    /// Owns the hex sphere topology and all tile data.
+    /// Acts as the primary interface for world generation algorithms.
     /// </summary>
     public class WorldMap
     {
-        /// <summary>Planet configuration (radius, resolution, seed)</summary>
-        public PlanetConfig Config { get; private set; }
+        /// <summary>Pre-computed hex sphere geometry and neighbor relationships.</summary>
+        public HexSphereTopology Topology { get; }
 
-        /// <summary>Hex sphere topology for neighbor lookups</summary>
-        public HexSphereTopology Topology { get; private set; }
+        /// <summary>Array of all tiles in the world. Indexed by tile ID.</summary>
+        public Tile[] Tiles { get; }
 
-        // Convenience accessors
-        public int Width => Config.Width;
-        public int Height => Config.Height;
+        /// <summary>World generation seed for deterministic generation.</summary>
+        public int Seed { get; }
 
-        // Pixel-based data layers (rendering, detailed noise)
-        public DataGrid<float> Elevation { get; private set; }
-        public DataGrid<float> CrustThickness { get; private set; }
-        public Lithosphere Lithosphere { get; private set; }
+        /// <summary>Resolution (subdivisions per icosahedron edge).</summary>
+        public int Resolution { get; }
 
-        /// <summary>
-        /// Debug layer: Feature type per pixel.
-        /// 0=Ocean, 1=Craton, 2=ActiveBoundary, 3=FossilBoundary, 4=Hotspot, 5=Biogenic
-        /// </summary>
-        public DataGrid<int> FeatureType { get; private set; }
+        /// <summary>Generated tectonic plates (null until GenerateTectonics is called).</summary>
+        public TectonicPlate[]? Plates { get; private set; }
 
-        // Hex-based data layers (plates, territories)
-        /// <summary>Plate ID for each hex tile (-1 = unassigned)</summary>
-        public int[] TilePlateId { get; private set; }
-
-        /// <summary>Boundary type for each hex tile</summary>
-        public BoundaryType[] TileBoundary { get; private set; }
-
-        /// <summary>Distance from this tile to its plate's seed tile</summary>
-        public float[] TileDistanceToSeed { get; private set; }
-
-        /// <summary>Microplate ID within continental plates (for ancient cratons)</summary>
-        public int[] TileMicroplateId { get; private set; }
-
-        /// <summary>True if this tile is on a microplate boundary (ancient orogeny)</summary>
-        public bool[] TileMicroBoundary { get; private set; }
-
-        /// <summary>Crust age (0 = new/rift, 1 = old/subductable). Affects oceanic depth.</summary>
-        public float[] TileAge { get; private set; }
+        /// <summary>Manages subtile data for high-resolution features.</summary>
+        public SubtileSystem Subtiles { get; private set; }
 
         /// <summary>
-        /// Cached mapping from pixel coordinates to hex tile IDs.
-        /// Pre-computed at construction to avoid per-frame O(n) lookups.
+        /// Creates a new world map with the specified resolution and seed.
+        /// Initializes topology, allocates tiles, and generates initial elevation.
         /// </summary>
-        public DataGrid<int> PixelTileMap { get; private set; }
-
-        /// <summary>
-        /// Creates a WorldMap from a PlanetConfig.
-        /// This is the preferred constructor for the new architecture.
-        /// </summary>
-        public WorldMap(PlanetConfig config)
+        /// <param name="resolution">Subdivisions per icosahedron edge (5-50 typical).</param>
+        /// <param name="seed">Random seed for deterministic generation.</param>
+        public WorldMap(int resolution, int seed)
         {
-            Config = config;
-            Topology = new HexSphereTopology(config.HexResolution);
+            Resolution = resolution;
+            Seed = seed;
 
-            // Initialize pixel-based layers
-            Elevation = new DataGrid<float>(Config.Width, Config.Height);
-            CrustThickness = new DataGrid<float>(Config.Width, Config.Height);
-            Lithosphere = new Lithosphere(Config.Width, Config.Height);
-            FeatureType = new DataGrid<int>(Config.Width, Config.Height);
+            // 1. Build topology (hex sphere geometry)
+            Topology = new HexSphereTopology(resolution);
 
-            // Initialize hex-based layers
-            TilePlateId = new int[Topology.TileCount];
-            TileBoundary = new BoundaryType[Topology.TileCount];
-            TileDistanceToSeed = new float[Topology.TileCount];
-            TileMicroplateId = new int[Topology.TileCount];
-            TileMicroBoundary = new bool[Topology.TileCount];
-            TileAge = new float[Topology.TileCount];
-
-            // Pre-compute pixel-to-tile mapping (expensive once, but fast lookups)
-            PixelTileMap = new DataGrid<int>(Config.Width, Config.Height);
-            BuildPixelTileMap();
-
-            // Default initialization
-            Elevation.Fill(-1.0f);
-            CrustThickness.Fill(1.0f);
-            FeatureType.Fill(0);
-
-            for (int i = 0; i < TilePlateId.Length; i++)
+            // 2. Allocate tiles
+            Tiles = new Tile[Topology.TileCount];
+            for (int i = 0; i < Tiles.Length; i++)
             {
-                TilePlateId[i] = -1; // Unassigned
-                TileBoundary[i] = BoundaryType.None;
-                TileDistanceToSeed[i] = float.MaxValue;
-                TileMicroplateId[i] = -1; // Unassigned
-                TileMicroBoundary[i] = false;
-                TileAge[i] = 0f; // Default age 0
+                Tiles[i] = Tile.Default;
+            }
+
+            // 3. Initialize subtile system
+            Subtiles = new SubtileSystem(this, seed);
+
+            // 4. Initialize with noise-based elevation (Phase 0 visualization)
+            InitializeElevation();
+        }
+
+        /// <summary>
+        /// Generates tectonic plates and applies Phase 1 tectonics.
+        /// Replaces noise-based elevation with plate-based geology.
+        /// </summary>
+        /// <param name="plateCount">Number of plates to generate (4-20 typical).</param>
+        /// <param name="continentalRatio">Fraction of plates that are continental (0-1).</param>
+        /// <param name="noiseStrength">Strength of noise for plate boundary irregularity.</param>
+        public void GenerateTectonics(int plateCount = 12, float continentalRatio = 0.4f, float noiseStrength = 1.0f)
+        {
+            var generator = new PlateGenerator(this, Seed)
+            {
+                PlateCount = plateCount,
+                ContinentalRatio = continentalRatio,
+                NoiseStrength = noiseStrength
+            };
+
+            generator.Generate();
+            Plates = generator.Plates;
+        }
+
+        /// <summary>
+        /// Initializes tiles with fractal noise elevation for Phase 0 visualization.
+        /// This provides immediate visual feedback; will be replaced by tectonics in Phase 1.
+        /// </summary>
+        private void InitializeElevation()
+        {
+            // Create noise generator with world seed
+            var noise = new FractalNoise(
+                seed: Seed,
+                octaves: 6,
+                persistence: 0.5f,
+                lacunarity: 2.0f,
+                scale: 0.8f // Coarse scale for continent-sized features
+            );
+
+            // Secondary noise for variation
+            var detailNoise = new FractalNoise(
+                seed: Seed + 1,
+                octaves: 4,
+                persistence: 0.6f,
+                lacunarity: 2.2f,
+                scale: 2.0f
+            );
+
+            for (int i = 0; i < Tiles.Length; i++)
+            {
+                var (lat, lon) = Topology.GetTileCenter(i);
+
+                // Convert to 3D for noise sampling (avoids distortion at poles)
+                var pos = SphericalMath.LatLonToHypersphere(lon, lat);
+
+                // Sample fractal noise
+                float n = noise.GetNoise(pos.X * 10f, pos.Y * 10f, pos.Z * 10f);
+                float detail = detailNoise.GetNoise(pos.X * 20f, pos.Y * 20f, pos.Z * 20f) * 0.2f;
+
+                // Combined noise in [-1, 1] range, shifted to elevation
+                float combined = n + detail;
+
+                // Map to elevation: -5000m to +5000m
+                float elevation = combined * 5000f;
+
+                // Determine land/water
+                bool isLand = elevation > 0;
+
+                Tiles[i].Elevation = elevation;
+                Tiles[i].IsLand = isLand;
             }
         }
 
         /// <summary>
-        /// Pre-computes the mapping from each pixel to its hex tile ID.
-        /// This is O(width×height×tiles) but only runs once at construction.
+        /// Gets a tile by ID. Returns reference for efficient access.
         /// </summary>
-        private void BuildPixelTileMap()
-        {
-            System.Threading.Tasks.Parallel.For(0, Height, y =>
-            {
-                for (int x = 0; x < Width; x++)
-                {
-                    var (lon, lat) = SphericalMath.PixelToLatLon(x, y, Width, Height);
-                    int tileId = Topology.GetTileAtLatLon(lat, lon);
-                    PixelTileMap.Set(x, y, tileId);
-                }
-            });
-        }
+        public ref Tile GetTile(int tileId) => ref Tiles[tileId];
 
         /// <summary>
-        /// Legacy constructor for backwards compatibility.
-        /// Creates a default Earth-sized planet with given pixel dimensions.
+        /// Gets read-only tile data by ID.
         /// </summary>
-        public WorldMap(int width, int height)
-            : this(new PlanetConfig
-            {
-                // Derive radius from pixel width
-                RadiusKm = width / (2f * System.MathF.PI * PlanetConfig.PixelsPerKm)
-            })
-        {
-        }
-
-        /// <summary>
-        /// Gets the hex tile ID for a given pixel coordinate (O(1) lookup).
-        /// </summary>
-        public int GetHexTileAt(int pixelX, int pixelY)
-        {
-            return PixelTileMap.Get(pixelX, pixelY);
-        }
+        public Tile GetTileReadOnly(int tileId) => Tiles[tileId];
     }
 }

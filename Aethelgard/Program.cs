@@ -1,467 +1,477 @@
-﻿using System.Numerics;
-using Raylib_cs;
+﻿using Raylib_cs;
 using ImGuiNET;
 using rlImGui_cs;
 using Aethelgard.Simulation;
 using Aethelgard.Rendering;
-using Aethelgard.Core;
-using Aethelgard.Interaction;
+using System;
+using System.Numerics;
 
 namespace Aethelgard;
 
+/// <summary>
+/// Main entry point for the Aethelgard World Generator.
+/// Provides tile-centric world generation with interactive ImGui controls.
+/// </summary>
 class Program
 {
-    private static Interaction.PlateGenerationSettings? _plateSettings;
-    private static Interaction.SimulateTectonicsSettings? _simSettings;
-    private static bool _isDrifting = false;
-    private static bool _enablePhysics = false;
-
-    // Planet configuration
-    private static PlanetConfig _planetConfig = new PlanetConfig();
-
     static void Main(string[] args)
     {
-        // 1. Initialization
+        // ═══════════════════════════════════════════════════════════════
+        // Window Initialization
+        // ═══════════════════════════════════════════════════════════════
         const int screenWidth = 1280;
         const int screenHeight = 720;
 
         Raylib.InitWindow(screenWidth, screenHeight, "Aethelgard World Engine");
         Raylib.SetTargetFPS(60);
-
-        // 2. Setup ImGui
         rlImGui.Setup(true);
 
-        // 3. Simulation & Systems - use PlanetConfig
-        WorldMap worldMap = new WorldMap(_planetConfig);
+        // ═══════════════════════════════════════════════════════════════
+        // World Generation Parameters (UI-controlled)
+        // ═══════════════════════════════════════════════════════════════
+        int resolution = 50;
+        int seed = 12345;
+        int renderWidth = 10800;   // Very high res for large subtiles
+        int renderHeight = 5400;
+
+        // Current render mode
+        int currentModeIndex = 0;
+        string[] modeNames = Enum.GetNames<MapRenderer.RenderMode>();
+
+        // Tectonics parameters
+        int plateCount = 12;
+        float continentalRatio = 0.4f;
+        float noiseStrength = 1.0f;
+
+        // Subtile parameters (persistent for slider state)
+        float subtileWarpStrength = 0.15f;
+        float subtileNoiseScale = 0.05f;
+        int subtileResolution = 4;
+        bool showSubtileBorders = false;
+        const float SubtileBorderMinZoom = 4.0f; // Only show borders at this zoom or higher
+
+        // ═══════════════════════════════════════════════════════════════
+        // Camera State
+        // ═══════════════════════════════════════════════════════════════
+        float zoom = 1.0f;
+        float zoomMin = 0.25f;   // Allow zooming out more
+        float zoomMax = 32.0f;   // Allow high zoom
+        float zoomSpeed = 0.1f;
+
+        Vector2 panOffset = Vector2.Zero;  // Pan in texture coordinates
+        float panSpeed = 300f;             // Pixels per second for WASD
+        bool isDragging = false;
+        Vector2 dragStart = Vector2.Zero;
+        Vector2 panAtDragStart = Vector2.Zero;
+
+        // ═══════════════════════════════════════════════════════════════
+        // Create Initial World
+        // ═══════════════════════════════════════════════════════════════
+        WorldMap map = new WorldMap(resolution, seed);
         MapRenderer renderer = new MapRenderer();
-        renderer.Initialize(worldMap.Width, worldMap.Height);
+        renderer.Initialize(renderWidth, renderHeight, map);
 
-        // Map Viewport Logic - 2:1 aspect ratio
-        Rectangle mapViewport = new Rectangle(50, 50, 700, 350);
+        // Map viewport (screen rectangle where map is drawn)
+        Rectangle mapViewport = new Rectangle(50, 50, 900, 450);
 
-        // Tools
-        float brushStrength = 0.05f;
-        int brushRadius = 5;
+        string statusMessage = $"World created: {map.Topology.TileCount:N0} tiles";
 
-        // State tracking for optimization
-        MapRenderer.RenderMode lastMode = renderer.CurrentMode;
-        float lastNoiseScale = 0.0125f;
-
+        // ═══════════════════════════════════════════════════════════════
         // Main Loop
+        // ═══════════════════════════════════════════════════════════════
         while (!Raylib.WindowShouldClose())
         {
-            bool mapDirty = false;
+            float dt = Raylib.GetFrameTime();
+            Vector2 mousePos = Raylib.GetMousePosition();
+            bool mouseInViewport = Raylib.CheckCollisionPointRec(mousePos, mapViewport);
+            bool imguiWantsMouse = ImGui.GetIO().WantCaptureMouse;
+            bool imguiWantsKeyboard = ImGui.GetIO().WantCaptureKeyboard;
 
-            // --- INPUT HANDLING ---
-            // Note: ImGui handles its own input. blocking logic usually happens if !ImGui.GetIO().WantCaptureMouse
-            if (!ImGui.GetIO().WantCaptureMouse)
+            // ═══════════════════════════════════════════════════════════
+            // Camera Input (only when not interacting with ImGui)
+            // ═══════════════════════════════════════════════════════════
+
+            // Zoom with scroll wheel
+            if (mouseInViewport && !imguiWantsMouse)
             {
-                if (Raylib.IsMouseButtonDown(MouseButton.Left))
+                float wheel = Raylib.GetMouseWheelMove();
+                if (wheel != 0)
                 {
-                    Vector2 mousePos = Raylib.GetMousePosition();
+                    zoom += wheel * zoomSpeed * zoom;  // Proportional zoom
+                    zoom = Math.Clamp(zoom, zoomMin, zoomMax);
+                }
+            }
 
-                    // Check intersection with map viewport
-                    if (Raylib.CheckCollisionPointRec(mousePos, mapViewport))
+            // Pan with mouse drag
+            if (!imguiWantsMouse)
+            {
+                if (Raylib.IsMouseButtonPressed(MouseButton.Left) && mouseInViewport)
+                {
+                    isDragging = true;
+                    dragStart = mousePos;
+                    panAtDragStart = panOffset;
+                }
+
+                if (isDragging && Raylib.IsMouseButtonDown(MouseButton.Left))
+                {
+                    Vector2 delta = mousePos - dragStart;
+                    // Convert screen delta to texture delta (accounting for zoom)
+                    panOffset = panAtDragStart - delta / zoom;
+                }
+
+                if (Raylib.IsMouseButtonReleased(MouseButton.Left))
+                {
+                    isDragging = false;
+                }
+            }
+
+            // Pan with WASD
+            if (!imguiWantsKeyboard)
+            {
+                float moveAmount = panSpeed * dt / zoom;
+                if (Raylib.IsKeyDown(KeyboardKey.W)) panOffset.Y -= moveAmount;
+                if (Raylib.IsKeyDown(KeyboardKey.S)) panOffset.Y += moveAmount;
+                if (Raylib.IsKeyDown(KeyboardKey.A)) panOffset.X -= moveAmount;
+                if (Raylib.IsKeyDown(KeyboardKey.D)) panOffset.X += moveAmount;
+
+                // Reset view with R
+                if (Raylib.IsKeyPressed(KeyboardKey.R))
+                {
+                    zoom = 1.0f;
+                    panOffset = Vector2.Zero;
+                }
+            }
+
+            // Clamp pan to prevent going too far off the map
+            // When zoom < 1, we don't need to allow panning (whole map fits in view)
+            float maxPanX = Math.Max(0, renderWidth * (zoom - 1) / (2 * zoom));
+            float maxPanY = Math.Max(0, renderHeight * (zoom - 1) / (2 * zoom));
+            panOffset.X = Math.Clamp(panOffset.X, -maxPanX, maxPanX);
+            panOffset.Y = Math.Clamp(panOffset.Y, -maxPanY, maxPanY);
+
+            // --- UPDATE ---
+            renderer.Update();
+
+            // --- DRAWING ---
+            Raylib.BeginDrawing();
+            Raylib.ClearBackground(new Color(30, 30, 35, 255));
+
+            // Calculate source rectangle (the portion of texture to show)
+            float sourceW = renderWidth / zoom;
+            float sourceH = renderHeight / zoom;
+            float sourceX = (renderWidth - sourceW) / 2 + panOffset.X;
+            float sourceY = (renderHeight - sourceH) / 2 + panOffset.Y;
+
+            Rectangle sourceRect = new Rectangle(sourceX, sourceY, sourceW, sourceH);
+            Rectangle destRect = mapViewport;
+
+            // Draw map with zoom/pan
+            renderer.DrawPro(sourceRect, destRect);
+
+            // Draw viewport border
+            Raylib.DrawRectangleLinesEx(mapViewport, 2, Color.White);
+
+            // -----------------------------------------------------------------------
+            // Interaction: Tile Highlighting & Wireframe
+            // -----------------------------------------------------------------------
+            // Retrieve current mouse position (already calculated above as mousePos, but valid to access here)
+            // Or just use the existing variable.
+
+            if (Raylib.CheckCollisionPointRec(mousePos, mapViewport))
+            {
+                // Convert Screen -> Map Texture Coordinates
+                // mapX = sourceX + (mouseX - destX) / destW * sourceW
+                float relativeX = (mousePos.X - mapViewport.Position.X) / mapViewport.Size.X;
+                float relativeY = (mousePos.Y - mapViewport.Position.Y) / mapViewport.Size.Y;
+
+                int mapPixelX = (int)(sourceRect.Position.X + relativeX * sourceRect.Size.X);
+                int mapPixelY = (int)(sourceRect.Position.Y + relativeY * sourceRect.Size.Y);
+
+                // Wrap X (Longitude)
+                if (mapPixelX < 0) mapPixelX = (mapPixelX % renderer.Width) + renderer.Width;
+                if (mapPixelX >= renderer.Width) mapPixelX = mapPixelX % renderer.Width;
+
+                // Clamp Y (Latitude)
+                mapPixelY = Math.Clamp(mapPixelY, 0, renderer.Height - 1);
+
+                // Get Tile ID using Organic Lookup
+                int hoverTileId = renderer.GetTileAtPixel(mapPixelX, mapPixelY);
+                if (map?.Tiles != null && hoverTileId >= 0 && hoverTileId < map.Tiles.Length)
+                {
+                    ref var tile = ref map.Tiles[hoverTileId];
+
+                    // Show Tooltip
+                    string info = $"Tile {hoverTileId}\nPlate: {tile.PlateId}\nType: {(tile.IsLand ? "Land" : "Water")}";
+                    Raylib.DrawText(info, (int)mousePos.X + 15, (int)mousePos.Y + 15, 20, Color.Yellow);
+
+                    // Hover: Draw Wireframe (Default behavior as requested)
                     {
-                        // Convert screen space to map space
-                        // Normalize 0..1 then map to 0..mapSize
-                        float normX = (mousePos.X - mapViewport.X) / mapViewport.Width;
-                        float normY = (mousePos.Y - mapViewport.Y) / mapViewport.Height;
+                        var vertices = map.Topology.GetTileVertices(hoverTileId);
 
-                        int mapX = (int)(normX * worldMap.Width);
-                        int mapY = (int)(normY * worldMap.Height);
+                        // Project vertices to screen
+                        for (int i = 0; i < vertices.Length; i++)
+                        {
+                            var (vLat, vLon) = vertices[i];
+                            var (nextLat, nextLon) = vertices[(i + 1) % vertices.Length];
 
-                        var cmd = new HeightmapBrushCommand(worldMap, mapX, mapY, brushStrength, brushRadius);
-                        CommandManager.Instance.ExecuteCommand(cmd);
+                            // Project Lat/Lon -> Map Pixel -> Screen Pixel
+                            Vector2 Project(float lat, float lon)
+                            {
+                                float px = (lon + 180f) / 360f * (renderer.Width - 1);
+                                float py = (90f - lat) / 180f * (renderer.Height - 1);
 
-                        mapDirty = true;
+                                // Handle wrapping for drawing? Simple clamp for now or check dist
+                                // Adjust for sourceRect offset
+                                float sx = (px - sourceRect.Position.X) / sourceRect.Size.X * mapViewport.Size.X + mapViewport.Position.X;
+                                float sy = (py - sourceRect.Position.Y) / sourceRect.Size.Y * mapViewport.Size.Y + mapViewport.Position.Y;
+
+                                return new Vector2(sx, sy);
+                            }
+
+                            Vector2 p1 = Project(vLat, vLon);
+                            Vector2 p2 = Project(nextLat, nextLon);
+
+                            // Don't draw cross-screen weirdness for wrapped polygons
+                            if (Vector2.Distance(p1, p2) < mapViewport.Size.X / 2)
+                                Raylib.DrawLineEx(p1, p2, 2f, Color.Yellow);
+                        }
                     }
                 }
             }
 
-            // Undo
-            if (Raylib.IsKeyPressed(KeyboardKey.Z)) // Simple shortcut
+            // Subtile Border Overlay (only at high zoom)
+            // Uses edge detection - draws where adjacent sample points have different IDs
+            // Sample grid is aligned to world coordinates to prevent flickering when panning
+            // -----------------------------------------------------------------------
+            if (showSubtileBorders && zoom >= SubtileBorderMinZoom && map?.Subtiles != null)
             {
-                CommandManager.Instance.Undo();
-                mapDirty = true;
+                Color borderColor = new Color(60, 60, 60, 180);
+
+                // Calculate visible lat/lon range
+                float minLon = (sourceRect.Position.X / (renderer.Width - 1)) * 360f - 180f;
+                float maxLon = ((sourceRect.Position.X + sourceRect.Size.X) / (renderer.Width - 1)) * 360f - 180f;
+                float minLat = 90f - ((sourceRect.Position.Y + sourceRect.Size.Y) / (renderer.Height - 1)) * 180f;
+                float maxLat = 90f - (sourceRect.Position.Y / (renderer.Height - 1)) * 180f;
+
+                // Fixed world-space sampling interval (degrees) - aligned to prevent flicker
+                float sampleInterval = 0.5f; // Sample every 0.5 degrees
+
+                // Align sample grid to world coordinates
+                float startLon = MathF.Floor(minLon / sampleInterval) * sampleInterval;
+                float startLat = MathF.Floor(minLat / sampleInterval) * sampleInterval;
+                float endLon = MathF.Ceiling(maxLon / sampleInterval) * sampleInterval;
+                float endLat = MathF.Ceiling(maxLat / sampleInterval) * sampleInterval;
+
+                int gridCountX = (int)((endLon - startLon) / sampleInterval) + 1;
+                int gridCountY = (int)((endLat - startLat) / sampleInterval) + 1;
+
+                // Safety limit
+                gridCountX = Math.Min(gridCountX, 200);
+                gridCountY = Math.Min(gridCountY, 200);
+
+                // Cache subtile IDs at world-aligned sample points
+                int[,] gridIds = new int[gridCountX, gridCountY];
+
+                for (int gy = 0; gy < gridCountY; gy++)
+                {
+                    for (int gx = 0; gx < gridCountX; gx++)
+                    {
+                        float lat = startLat + gy * sampleInterval;
+                        float lon = startLon + gx * sampleInterval;
+                        var point = LatLonToCartesian(lat, lon);
+                        gridIds[gx, gy] = map.Subtiles.GetSubtileId(point);
+                    }
+                }
+
+                // Helper to convert lat/lon to screen position
+                Vector2 LatLonToScreen(float lat, float lon)
+                {
+                    float px = (lon + 180f) / 360f * (renderer.Width - 1);
+                    float py = (90f - lat) / 180f * (renderer.Height - 1);
+                    float sx = (px - sourceRect.Position.X) / sourceRect.Size.X * mapViewport.Size.X + mapViewport.Position.X;
+                    float sy = (py - sourceRect.Position.Y) / sourceRect.Size.Y * mapViewport.Size.Y + mapViewport.Position.Y;
+                    return new Vector2(sx, sy);
+                }
+
+                // Draw borders where adjacent cells have different IDs
+                for (int gy = 0; gy < gridCountY - 1; gy++)
+                {
+                    for (int gx = 0; gx < gridCountX - 1; gx++)
+                    {
+                        int current = gridIds[gx, gy];
+                        int right = gridIds[gx + 1, gy];
+                        int down = gridIds[gx, gy + 1];
+
+                        float lat = startLat + gy * sampleInterval;
+                        float lon = startLon + gx * sampleInterval;
+
+                        // Draw vertical edge if right neighbor differs
+                        if (current != right)
+                        {
+                            Vector2 p1 = LatLonToScreen(lat, lon + sampleInterval);
+                            Vector2 p2 = LatLonToScreen(lat + sampleInterval, lon + sampleInterval);
+                            if (p1.X >= mapViewport.Position.X && p1.X <= mapViewport.Position.X + mapViewport.Size.X)
+                                Raylib.DrawLineEx(p1, p2, 1f, borderColor);
+                        }
+
+                        // Draw horizontal edge if bottom neighbor differs
+                        if (current != down)
+                        {
+                            Vector2 p1 = LatLonToScreen(lat + sampleInterval, lon);
+                            Vector2 p2 = LatLonToScreen(lat + sampleInterval, lon + sampleInterval);
+                            if (p1.Y >= mapViewport.Position.Y && p1.Y <= mapViewport.Position.Y + mapViewport.Size.Y)
+                                Raylib.DrawLineEx(p1, p2, 1f, borderColor);
+                        }
+                    }
+                }
             }
 
-            // --- RENDER UPDATE ---
-            // Optimization: Only update texture if map changed, mode changed, or relevant settings changed
-            if (_isDrifting) mapDirty = true; // Always update during simulation
-
-            // Check if noise scale changed (only matters for DebugNoise)
-            if (_plateSettings != null && Math.Abs(_plateSettings.DistortionScale - lastNoiseScale) > 0.0001f)
+            // Helper function for lat/lon to cartesian
+            static Vector3 LatLonToCartesian(float lat, float lon)
             {
-                if (renderer.CurrentMode == MapRenderer.RenderMode.DebugNoise) mapDirty = true;
-                lastNoiseScale = _plateSettings.DistortionScale;
-                renderer.NoiseScale = lastNoiseScale;
+                float latRad = lat * MathF.PI / 180f;
+                float lonRad = lon * MathF.PI / 180f;
+                return new Vector3(
+                    MathF.Cos(latRad) * MathF.Cos(lonRad),
+                    MathF.Sin(latRad),
+                    MathF.Cos(latRad) * MathF.Sin(lonRad)
+                );
             }
 
-            if (mapDirty || renderer.CurrentMode != lastMode)
-            {
-                renderer.Update(worldMap);
-                lastMode = renderer.CurrentMode;
-            }
-
-            // --- DRAWING ---
-            Raylib.BeginDrawing();
-            Raylib.ClearBackground(Color.DarkGray);
-
-            // Draw Map
-            renderer.Draw((int)mapViewport.X, (int)mapViewport.Y, (int)mapViewport.Width, (int)mapViewport.Height);
-            Raylib.DrawRectangleLinesEx(mapViewport, 2, Color.White); // Border
-
-            // 5. UI Layer (ImGui)
+            // ═══════════════════════════════════════════════════════════
+            // ImGui UI
+            // ═══════════════════════════════════════════════════════════
             rlImGui.Begin();
 
-            ImGui.Begin("Simulation Controller");
-            ImGui.Text($"Planet: {worldMap.Config}");
-            ImGui.Text($"Hex Tiles: {worldMap.Topology.TileCount} ({worldMap.Topology.PentagonCount} pentagons)");
+            ImGui.Begin("World Generation");
 
+            ImGui.TextColored(new Vector4(0.4f, 1f, 0.6f, 1), statusMessage);
             ImGui.Separator();
 
-            // ... (rest of UI) ...
-
-            // In "Tectonic Controls" window (later in file), we need to ensure mapDirty is set on Generate
-            // Use a flag? The ImGui code is below.
-            // We can't access `mapDirty` inside the UI code block below easily if it's a huge method.
-            // Wait, this is all inside `Main`. So `mapDirty` is available!
-            // I need to make sure the UI code below sets `mapDirty` when buttons are clicked.
-
-            // Re-pasting the UI generation code to inject mapDirty=true is risky if I don't see it all.
-            // I replaced lines 46-100+ above.
-            // The UI code *starts* at line 94 in original.
-            // My replacement overlaps the start of UI.
-            // I need to continue the replacement to cover button clicks if possible.
-            // But Button clicks are further down (line 188).
-
-            // Strategy: I will replace the top loop part. 
-            // For the buttons down below, I will do a separate replacement to add `mapDirty = true;`.
-
-            /* Continuing replacement for top part */
-
-            ImGui.Text("Brush Settings");
-            ImGui.SliderFloat("Strength", ref brushStrength, 0.001f, 0.5f);
-            ImGui.SliderInt("Radius", ref brushRadius, 1, 50);
-
-            if (ImGui.Button("Reset Map"))
-            {
-                // Helper to clear map, maybe add a Command for this later
-                worldMap.Elevation.Fill(0.0f);
-            }
-
-            ImGui.Separator();
-            if (ImGui.Button("Undo (Z)"))
-            {
-                CommandManager.Instance.Undo();
-            }
-
-            ImGui.End();
-
-            // Planet Configuration Panel
-            ImGui.Begin("Planet Configuration");
-
-            float radius = _planetConfig.RadiusKm;
-            if (ImGui.SliderFloat("Radius (km)", ref radius, 500f, 20000f, "%.0f"))
-            {
-                _planetConfig.RadiusKm = radius;
-            }
-            ImGui.Text($"Resolution: {_planetConfig.Width}x{_planetConfig.Height}px");
-
-            int hexRes = _planetConfig.HexResolution;
-            if (ImGui.SliderInt("Hex Resolution", ref hexRes, 8, 64))
-            {
-                _planetConfig.HexResolution = hexRes;
-            }
-            ImGui.Text($"Hex Tiles: {_planetConfig.HexTileCount}");
-
-            int seed = _planetConfig.Seed;
-            if (ImGui.InputInt("Seed", ref seed))
-            {
-                _planetConfig.Seed = seed;
-            }
-
-            ImGui.Separator();
-            if (ImGui.Button("Generate New Planet"))
-            {
-                // Create new world with current config
-                worldMap = new WorldMap(_planetConfig);
-                renderer.Dispose();
-                renderer = new MapRenderer();
-                renderer.Initialize(worldMap.Width, worldMap.Height);
-            }
-
-            ImGui.End();
-
-            ImGui.Begin("Tectonic Controls");
-
-            if (_plateSettings == null) _plateSettings = new PlateGenerationSettings();
-
+            // Generation Controls
             ImGui.Text("Generation Parameters");
 
-            // Mode Selector
-            string[] modes = Enum.GetNames(typeof(GenerationMode));
-            int currentMode = (int)_plateSettings.Mode;
-            if (ImGui.Combo("Mode", ref currentMode, modes, modes.Length))
-            {
-                _plateSettings.Mode = (GenerationMode)currentMode;
-            }
+            bool paramsChanged = false;
+            ImGui.SliderInt("Resolution", ref resolution, 5, 50);
+            if (ImGui.IsItemDeactivatedAfterEdit()) paramsChanged = true;
 
-            ImGui.SliderInt("Target Plates", ref _plateSettings.TargetPlateCount, 5, 200);
-            ImGui.SliderInt("Micro Factor", ref _plateSettings.MicroPlateFactor, 1, 20);
-            ImGui.SliderFloat("Weight Var", ref _plateSettings.WeightVariance, 0.0f, 2.0f);
+            ImGui.InputInt("Seed", ref seed);
+            if (ImGui.IsItemDeactivatedAfterEdit()) paramsChanged = true;
 
-            ImGui.Separator();
-            ImGui.Text("Distortion (FBM)");
-            ImGui.SliderFloat("Scale", ref _plateSettings.DistortionScale, 0.001f, 0.05f);
-            ImGui.SliderFloat("Strength", ref _plateSettings.DistortionStrength, 0.0f, 100.0f);
-
-            ImGui.Separator();
-            ImGui.Checkbox("Random Seed", ref _plateSettings.UseRandomSeed);
-            if (!_plateSettings.UseRandomSeed)
+            if (ImGui.Button("Regenerate World") || paramsChanged)
             {
-                ImGui.InputInt("Seed", ref _plateSettings.Seed);
-            }
-            else
-            {
-                ImGui.Text($"Last Seed: {_plateSettings.Seed}");
-            }
-
-            if (ImGui.Button("Generate Plates"))
-            {
-                var cmd = new GeneratePlatesCommand(worldMap, _plateSettings);
-                CommandManager.Instance.ExecuteCommand(cmd);
-                renderer.CurrentMode = MapRenderer.RenderMode.Elevation; // Auto-switch to see continents
+                map = new WorldMap(resolution, seed);
+                renderer.Dispose();
+                renderer = new MapRenderer();
+                renderer.Initialize(renderWidth, renderHeight, map);
+                statusMessage = $"World regenerated: {map.Topology.TileCount:N0} tiles";
             }
 
             ImGui.Separator();
-            ImGui.Text("Crust Settings");
-            ImGui.SliderFloat("Percent Land", ref _plateSettings.ContinentalRatio, 0.1f, 0.9f);
-            ImGui.SliderFloat("Ocean Depth", ref _plateSettings.OceanicLevel, -2.0f, -0.1f);
 
-            ImGui.Separator();
-            ImGui.Text("Hex Organic Settings (HexOrganic mode)");
-            ImGui.SliderFloat("Ruggedness", ref _plateSettings.Ruggedness, 0.0f, 1.0f);
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Controls border jaggedness. 0=smooth, 1=very jagged");
-
-            ImGui.SliderFloat("Boundary Threshold", ref _plateSettings.BoundaryThreshold, 0.0f, 1.0f);
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Dot product threshold for convergent/divergent classification");
-
-            ImGui.Separator();
-            ImGui.Text("Projection");
-            ImGui.Checkbox("Spherical Projection", ref _plateSettings.UseSphericalProjection);
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Use spherical distance for realistic polar plates");
-
-            ImGui.Separator();
-            ImGui.Text("View Mode");
-            if (ImGui.RadioButton("Elevation", renderer.CurrentMode == MapRenderer.RenderMode.Elevation))
-                renderer.CurrentMode = MapRenderer.RenderMode.Elevation;
-
-            if (ImGui.RadioButton("Plates", renderer.CurrentMode == MapRenderer.RenderMode.Plates))
-                renderer.CurrentMode = MapRenderer.RenderMode.Plates;
-
-            if (ImGui.RadioButton("Feature Types (Debug)", renderer.CurrentMode == MapRenderer.RenderMode.FeatureTypes))
-                renderer.CurrentMode = MapRenderer.RenderMode.FeatureTypes;
-
-            ImGui.Separator();
-            ImGui.Text("Tectonic Debug");
-            if (ImGui.RadioButton("Boundary Types", renderer.CurrentMode == MapRenderer.RenderMode.BoundaryTypes))
-                renderer.CurrentMode = MapRenderer.RenderMode.BoundaryTypes;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Red=Convergent, Blue=Divergent, Yellow=Transform");
-
-            if (ImGui.RadioButton("Plate Velocity", renderer.CurrentMode == MapRenderer.RenderMode.PlateVelocity))
-                renderer.CurrentMode = MapRenderer.RenderMode.PlateVelocity;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Hue shows drift direction, saturation shows speed");
-
-            if (ImGui.RadioButton("Continental/Oceanic", renderer.CurrentMode == MapRenderer.RenderMode.Continental))
-                renderer.CurrentMode = MapRenderer.RenderMode.Continental;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Green=Continental crust, Blue=Oceanic crust");
-
-            if (ImGui.RadioButton("Microplates (Cratons)", renderer.CurrentMode == MapRenderer.RenderMode.Microplates))
-                renderer.CurrentMode = MapRenderer.RenderMode.Microplates;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Shows internal continental subdivisions. White lines are ancient boundaries.");
-
-            if (ImGui.RadioButton("Oceanic Crust Age", renderer.CurrentMode == MapRenderer.RenderMode.CrustAge))
-                renderer.CurrentMode = MapRenderer.RenderMode.CrustAge;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Shows oceanic crust age. Red=New(Ridge), Blue=Old(Abyssal).");
-
-            if (ImGui.RadioButton("Debug Noise", renderer.CurrentMode == MapRenderer.RenderMode.DebugNoise))
-                renderer.CurrentMode = MapRenderer.RenderMode.DebugNoise;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Grayscale FBM noise used for flood fill distortion");
-
-            ImGui.Separator();
-            ImGui.Text("Hex Grid Debug");
-            if (ImGui.RadioButton("Hex Tiles", renderer.CurrentMode == MapRenderer.RenderMode.HexTiles))
-                renderer.CurrentMode = MapRenderer.RenderMode.HexTiles;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Show hex tiles (magenta = pentagons)");
-
-            if (ImGui.RadioButton("Hex Faces (20)", renderer.CurrentMode == MapRenderer.RenderMode.HexFaces))
-                renderer.CurrentMode = MapRenderer.RenderMode.HexFaces;
-            if (ImGui.IsItemHovered())
-                ImGui.SetTooltip("Show 20 icosahedron faces (white = pentagons)");
-
-            ImGui.End();
-
-            // ImGui.End(); // Removed duplicate
-
-            // --- Tectonics & Dynamics Panel ---
-            ImGui.Begin("Plate Dynamics");
-
-            if (_simSettings == null) _simSettings = new Interaction.SimulateTectonicsSettings();
-
-            ImGui.Separator();
-            ImGui.Separator();
-            ImGui.Text("Kinematic Simulation (Drift)");
-            ImGui.SliderFloat("Drift Speed", ref _simSettings.DriftSpeed, 0.1f, 5.0f);
-
-            // Realtime Toggle
-            if (_isDrifting)
+            // Visualization Controls
+            ImGui.Text("Visualization");
+            if (ImGui.Combo("Mode", ref currentModeIndex, modeNames, modeNames.Length))
             {
-                if (ImGui.Button("Stop Drift")) _isDrifting = false;
-            }
-            else
-            {
-                if (ImGui.Button("Play Drift")) _isDrifting = true;
-            }
-
-            ImGui.Checkbox("Enable Tectonics (Realtime Physics)", ref _enablePhysics);
-
-            // Manual Step
-            if (ImGui.Button("Step (1 Frame)"))
-            {
-                var cmdDrift = new DriftPlatesCommand(worldMap, 1, _simSettings.DriftSpeed);
-                cmdDrift.Execute();
-
-                if (_enablePhysics)
-                {
-                    var cmdTec = new SimulateTectonicsCommand(worldMap, _simSettings);
-                    cmdTec.Execute();
-                }
-                renderer.CurrentMode = MapRenderer.RenderMode.Plates;
-            }
-
-            // Logic needed in Main Loop
-            if (_isDrifting)
-            {
-                // 1. Move
-                var cmdDrift = new DriftPlatesCommand(worldMap, 1, _simSettings.DriftSpeed);
-                cmdDrift.Execute(); // Direct execution
-
-                // 2. Orogeny (Physics)
-                if (_enablePhysics)
-                {
-                    var cmdTec = new SimulateTectonicsCommand(worldMap, _simSettings);
-                    cmdTec.Execute(); // Direct execution
-                }
-
-                // renderer.CurrentMode = MapRenderer.RenderMode.Plates; // Optional: Force view
+                renderer.CurrentMode = (MapRenderer.RenderMode)currentModeIndex;
+                renderer.IsDirty = true;
             }
 
             ImGui.Separator();
-            ImGui.Text("Plate Dynamics (Vertical)");
-            ImGui.Text("Simulation Parameters");
-            ImGui.SliderFloat("Uplift", ref _simSettings.UpliftStrength, 0.01f, 1.0f);
-            ImGui.SliderFloat("Width (Blur)", ref _simSettings.CollisionWidth, 1.0f, 20.0f);
 
-            if (ImGui.Button("Simulate Tectonics"))
+            // Tectonics Controls
+            ImGui.Text("Tectonics (Phase 1)");
+
+            ImGui.SliderInt("Plate Count", ref plateCount, 4, 20);
+            ImGui.SliderFloat("Continental Ratio", ref continentalRatio, 0.2f, 0.7f, "%.2f");
+            ImGui.SliderFloat("Noise Strength", ref noiseStrength, 0.2f, 2.0f, "%.1f");
+
+            if (ImGui.Button("Generate Tectonics"))
             {
-                var cmd = new SimulateTectonicsCommand(worldMap, _simSettings);
-                CommandManager.Instance.ExecuteCommand(cmd);
-                renderer.CurrentMode = MapRenderer.RenderMode.Elevation; // Switch view to see results
+                map?.GenerateTectonics(plateCount, continentalRatio, noiseStrength);
+                renderer.IsDirty = true;
+                statusMessage = $"Tectonics generated: {map?.Plates?.Length ?? 0} plates";
             }
 
             ImGui.Separator();
-            ImGui.Text("Physics-Based Terrain Settings");
+            ImGui.Text("Subtile System (Organic Borders)");
 
-            if (ImGui.CollapsingHeader("Isostasy (Crust Thickness)"))
+            bool subtileChanged = false;
+
+            if (ImGui.SliderFloat("Warp Strength", ref subtileWarpStrength, 0.0f, 0.5f, "%.2f"))
             {
-                ImGui.SliderFloat("Mantle Equilibrium", ref _simSettings.MantleEquilibrium, 20f, 40f);
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Reference thickness (km) that floats at sea level");
-                ImGui.SliderFloat("Buoyancy Factor", ref _simSettings.BuoyancyFactor, 0.005f, 0.03f);
-                ImGui.SliderFloat("Continental Thickness", ref _simSettings.ContinentalThickness, 25f, 50f);
-                ImGui.SliderFloat("Oceanic Thickness", ref _simSettings.OceanicThickness, 3f, 15f);
-                ImGui.SliderFloat("Thickness Variation", ref _simSettings.ThicknessVariation, 0f, 15f);
+                // Preview change but don't apply yet
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit())
+                subtileChanged = true;
+
+            // Scale is now in angular space - 0.01 = very smooth, 0.2 = detailed
+            if (ImGui.SliderFloat("Noise Frequency", ref subtileNoiseScale, 0.01f, 0.2f, "%.3f"))
+            {
+                // Preview change but don't apply yet
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit())
+                subtileChanged = true;
+
+            if (ImGui.SliderInt("Subtile Resolution", ref subtileResolution, 2, 8, "%dx"))
+            {
+                // Preview change but don't apply yet
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit() && map?.Subtiles != null)
+            {
+                map.Subtiles.ResolutionMultiplier = subtileResolution;
+                renderer.IsDirty = true;
             }
 
-            if (ImGui.CollapsingHeader("Plate Boundaries"))
+            if (subtileChanged && map?.Subtiles != null)
             {
-                ImGui.SliderFloat("Convergent Thickening", ref _simSettings.ConvergentThickening, 10f, 50f);
-                if (ImGui.IsItemHovered())
-                    ImGui.SetTooltip("Extra crust thickness at collision zones (mountains)");
-                ImGui.SliderFloat("Divergent Thinning", ref _simSettings.DivergentThinning, 5f, 30f);
-                ImGui.SliderFloat("Boundary Width", ref _simSettings.BoundaryWidth, 20f, 150f); // MaxDist depends on this
-                ImGui.SliderFloat("Boundary Decay", ref _simSettings.BoundaryDecay, 0.8f, 0.98f);
-                ImGui.SliderFloat("Rift Width", ref _simSettings.RiftWidth, 1.0f, 15.0f);
+                map.Subtiles.UpdateConfig(subtileNoiseScale, subtileWarpStrength);
+                renderer.IsDirty = true;
             }
 
-            if (ImGui.CollapsingHeader("Active Margins (Mountains)"))
+            // Subtile border overlay toggle
+            ImGui.Checkbox("Show Subtile Borders", ref showSubtileBorders);
+            if (showSubtileBorders && zoom < SubtileBorderMinZoom)
             {
-                ImGui.SliderFloat("Arc/Peak Offset", ref _simSettings.ArcOffset, 0f, 50f);
-                ImGui.SliderFloat("Core Width", ref _simSettings.ArcWidth, 5f, 40f);
-                ImGui.SliderFloat("Plateau Width", ref _simSettings.PlateauWidth, 10f, 80f);
-                ImGui.SliderFloat("Band Scale", ref _simSettings.BandScale, 2f, 20f);
-                ImGui.SliderFloat("Coast Buffer", ref _simSettings.CoastBuffer, 0f, 40f);
-                ImGui.SliderFloat("Forearc Dip", ref _simSettings.ForearcSubsidence, 0f, 10f);
+                ImGui.SameLine();
+                ImGui.TextColored(new Vector4(1, 0.5f, 0, 1), $"(Zoom {SubtileBorderMinZoom}x+ to see)");
             }
 
-            if (ImGui.CollapsingHeader("Mantle Dynamics"))
-            {
-                ImGui.SliderInt("Basin Count Min", ref _simSettings.MantleLowsMin, 0, 10);
-                ImGui.SliderInt("Basin Count Max", ref _simSettings.MantleLowsMax, 1, 15);
-                ImGui.SliderFloat("Basin Strength", ref _simSettings.MantleLowStrength, 0f, 20f);
-                ImGui.SliderFloat("Basin Radius", ref _simSettings.MantleLowRadius, 30f, 150f);
-            }
+            ImGui.Separator();
 
-            if (ImGui.CollapsingHeader("Hotspots"))
+            // Camera Controls
+            ImGui.Text("Camera");
+            ImGui.SliderFloat("Zoom", ref zoom, zoomMin, zoomMax, "%.1fx");
+            if (ImGui.Button("Reset View (R)"))
             {
-                ImGui.SliderInt("Hotspots Min", ref _simSettings.HotspotsMin, 0, 20);
-                ImGui.SliderInt("Hotspots Max", ref _simSettings.HotspotsMax, 1, 30);
-                ImGui.SliderFloat("Hotspot Thickening", ref _simSettings.HotspotThickening, 2f, 15f);
-                ImGui.SliderFloat("Hotspot Radius", ref _simSettings.HotspotRadius, 10f, 50f);
-                ImGui.SliderFloat("Track Wiggle", ref _simSettings.HotspotWiggle, 0.0f, 5.0f);
-                ImGui.SliderFloat("Chain Chance", ref _simSettings.HotspotChainChance, 0.0f, 1.0f);
+                zoom = 1.0f;
+                panOffset = Vector2.Zero;
             }
+            ImGui.TextDisabled("Scroll=Zoom, Drag=Pan, WASD=Move");
 
-            if (ImGui.CollapsingHeader("Fossil Sutures"))
+            ImGui.Separator();
+
+            // Statistics
+            ImGui.Text("World Statistics");
+            ImGui.BulletText($"Tiles: {map.Topology.TileCount:N0}");
+            int landCount = 0;
+            if (map?.Tiles != null)
             {
-                ImGui.SliderInt("Sub-Regions Min", ref _simSettings.FossilSubRegionsMin, 1, 10);
-                ImGui.SliderInt("Sub-Regions Max", ref _simSettings.FossilSubRegionsMax, 2, 15);
-                ImGui.SliderFloat("Suture Thickening", ref _simSettings.FossilThickening, 5f, 25f);
-                ImGui.SliderFloat("Grain Strength", ref _simSettings.FossilGrainStrength, 0.0f, 1.5f);
+                for (int i = 0; i < map.Tiles.Length; i++)
+                    if (map.Tiles[i].IsLand) landCount++;
             }
-
-            if (ImGui.CollapsingHeader("Erosion"))
-            {
-                ImGui.SliderFloat("Erosion Strength", ref _simSettings.ErosionStrength, 0f, 1f);
-                ImGui.SliderFloat("Flow Carve Strength", ref _simSettings.FlowErosionStrength, 0f, 1f);
-                ImGui.SliderInt("Erosion Passes", ref _simSettings.ErosionPasses, 1, 10);
-                ImGui.SliderFloat("Glacial Str", ref _simSettings.GlacialStrength, 0.0f, 1.5f);
-                ImGui.SliderFloat("Sediment Base", ref _simSettings.SedimentDeposition, 0.0f, 0.02f);
-            }
-
-            // Helper to visualize velocities?
-            // if (ImGui.Button("Randomize Velocities")) ... (Already done in generation)
+            float totalTiles = map?.Tiles?.Length ?? 1; // Avoid div/0
+            ImGui.BulletText($"Land: {(landCount * 100f) / totalTiles:F1}%");
 
             ImGui.End();
 
             rlImGui.End();
-
             Raylib.EndDrawing();
         }
 
+        // ═══════════════════════════════════════════════════════════════
         // Cleanup
+        // ═══════════════════════════════════════════════════════════════
         renderer.Dispose();
         rlImGui.Shutdown();
         Raylib.CloseWindow();

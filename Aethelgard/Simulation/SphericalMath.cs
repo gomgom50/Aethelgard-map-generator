@@ -108,5 +108,21 @@ namespace Aethelgard.Simulation
         {
             return (x / (float)width) * 360f - 180f;
         }
+        /// <summary>
+        /// Convert Lat/Lon to a 3D point on the unit sphere.
+        /// Useful for vector math (dot products, direction checks).
+        /// </summary>
+        public static System.Numerics.Vector3 LatLonToHypersphere(float lon, float lat)
+        {
+            float lonRad = lon * DEG_TO_RAD;
+            float latRad = lat * DEG_TO_RAD;
+
+            // Standard spherical coords (Y-up)
+            float x = (float)(Math.Cos(latRad) * Math.Cos(lonRad));
+            float y = (float)Math.Sin(latRad);
+            float z = (float)(Math.Cos(latRad) * Math.Sin(lonRad));
+
+            return new System.Numerics.Vector3(x, y, z);
+        }
     }
 }
