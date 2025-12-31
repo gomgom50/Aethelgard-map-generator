@@ -40,8 +40,8 @@ namespace Aethelgard.Simulation.Systems
         // But implicitly available via _blendCache[id].WinnerId
 
         // Configuration matching Gleba's "organic" look
-        private float _noiseScale = 35.7f;        // Scale of the 3D Noise Field (Higher = more wiggly)
-        private float _warpStrength = 0.015f;     // Magnitude of the 3D displacement
+        private float _noiseScale = 100.0f;        // Scale of the 3D Noise Field (Higher = more wiggly)
+        private float _warpStrength = 0.002f;     // Magnitude of the 3D displacement
         private float _detailNoiseStrength = 100.0f; // Scale of the added height detail
 
         public float NoiseScale => _noiseScale;

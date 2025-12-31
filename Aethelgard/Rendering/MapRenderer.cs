@@ -14,10 +14,8 @@ namespace Aethelgard.Rendering
     /// </summary>
     public class MapRenderer : IDisposable
     {
-        private Texture2D _lutTextureWarped;   // For organic modes
-        private Texture2D _lutTextureUnwarped; // For geometric/debug modes
-        private Image _lutImageWarped;
-        private Image _lutImageUnwarped;
+        private Texture2D _lutTexture; // Single LUT (Geometric/Unwarped)
+        private Image _lutImage;
 
         private Texture2D _valueTexture;
         private Image _valueImage;
@@ -28,6 +26,12 @@ namespace Aethelgard.Rendering
         private int _locSubtileCount;
         private int _locValueTextureSize;
         private int _locUseRamp;
+
+        // New Uniforms for Shader Warp
+        private int _locNoiseScale;
+        private int _locWarpStrength;
+        private int _locWarpEnabled;
+        private int _locLutSize; // For pixel snapping
 
         private bool _initialized;
         private WorldMap? _map;
@@ -100,6 +104,12 @@ namespace Aethelgard.Rendering
                 _locSubtileCount = Raylib.GetShaderLocation(_shader, "subtileCount");
                 _locValueTextureSize = Raylib.GetShaderLocation(_shader, "valueTextureSize");
                 _locUseRamp = Raylib.GetShaderLocation(_shader, "useRamp");
+
+                // Warp Logic
+                _locNoiseScale = Raylib.GetShaderLocation(_shader, "noiseScale");
+                _locWarpStrength = Raylib.GetShaderLocation(_shader, "warpStrength");
+                _locWarpEnabled = Raylib.GetShaderLocation(_shader, "warpEnabled");
+                _locLutSize = Raylib.GetShaderLocation(_shader, "lutSize");
             }
             catch (Exception e)
             {
@@ -107,14 +117,9 @@ namespace Aethelgard.Rendering
             }
 
             // Init images
-            _lutImageWarped = Raylib.GenImageColor(width, height, Color.Black);
-            _lutImageUnwarped = Raylib.GenImageColor(width, height, Color.Black);
-
-            _lutTextureWarped = Raylib.LoadTextureFromImage(_lutImageWarped);
-            _lutTextureUnwarped = Raylib.LoadTextureFromImage(_lutImageUnwarped);
-
-            Raylib.SetTextureFilter(_lutTextureWarped, TextureFilter.Point);
-            Raylib.SetTextureFilter(_lutTextureUnwarped, TextureFilter.Point);
+            _lutImage = Raylib.GenImageColor(width, height, Color.Black);
+            _lutTexture = Raylib.LoadTextureFromImage(_lutImage);
+            Raylib.SetTextureFilter(_lutTexture, TextureFilter.Point);
 
             // Init value texture (placeholder size, will resize in UpdateValues)
             _valueImage = Raylib.GenImageColor(1, 1, Color.Magenta);
@@ -156,62 +161,79 @@ namespace Aethelgard.Rendering
         /// Rebuilds the LUT (Pixels -> Subtile ID).
         /// O(Width * Height). Expensive. Do only on resize/topology change.
         /// </summary>
+        /// <summary>
+        /// Rebuilds the LUT (Pixels -> Subtile ID).
+        /// Optimized with Trig Tables and Parallel processing.
+        /// </summary>
         private void UpdateLut()
         {
             // Resize if needed
-            if (_lutImageWarped.Width != Width || _lutImageWarped.Height != Height)
+            if (_lutImage.Width != Width || _lutImage.Height != Height)
             {
-                Raylib.UnloadTexture(_lutTextureWarped);
-                Raylib.UnloadTexture(_lutTextureUnwarped);
-                Raylib.UnloadImage(_lutImageWarped);
-                Raylib.UnloadImage(_lutImageUnwarped);
-
-                _lutImageWarped = Raylib.GenImageColor(Width, Height, Color.Black);
-                _lutImageUnwarped = Raylib.GenImageColor(Width, Height, Color.Black);
-
-                _lutTextureWarped = Raylib.LoadTextureFromImage(_lutImageWarped);
-                _lutTextureUnwarped = Raylib.LoadTextureFromImage(_lutImageUnwarped);
-
-                Raylib.SetTextureFilter(_lutTextureWarped, TextureFilter.Point);
-                Raylib.SetTextureFilter(_lutTextureUnwarped, TextureFilter.Point);
+                Raylib.UnloadTexture(_lutTexture);
+                Raylib.UnloadImage(_lutImage);
+                _lutImage = Raylib.GenImageColor(Width, Height, Color.Black);
+                _lutTexture = Raylib.LoadTextureFromImage(_lutImage);
+                Raylib.SetTextureFilter(_lutTexture, TextureFilter.Point);
             }
 
             unsafe
             {
-                Color* pixelsWarped = (Color*)_lutImageWarped.Data;
-                Color* pixelsUnwarped = (Color*)_lutImageUnwarped.Data;
+                Color* pixels = (Color*)_lutImage.Data;
 
-                // Parallel loop to calculate Subtile ID for every pixel
-                Parallel.For(0, Height, py =>
+                // ---------------------------------------------------------
+                // STRATEGY: Precompute Trig Tables (X-Axis)
+                // ---------------------------------------------------------
+                float[] lonCos = new float[Width];
+                float[] lonSin = new float[Width];
+
+                // Parallel precompute helps on very large widths (21k)
+                Parallel.For(0, Width, x =>
                 {
-                    for (int px = 0; px < Width; px++)
+                    float px_norm = x / (float)(Width - 1);
+                    float theta = (px_norm * 360f - 180f) * (MathF.PI / 180f);
+                    lonCos[x] = MathF.Cos(theta);
+                    lonSin[x] = MathF.Sin(theta);
+                });
+
+                // ---------------------------------------------------------
+                // Process Rows in Parallel
+                // ---------------------------------------------------------
+                Parallel.For(0, Height, y =>
+                {
+                    // Calculate Y-Axis (Latitude) values ONCE per row.
+                    float py_norm = y / (float)(Height - 1);
+                    float lat = 90f - py_norm * 180f;
+                    float phi = (90f - lat) * (MathF.PI / 180f);
+
+                    float y_3d = MathF.Cos(phi);
+                    float radius_at_y = MathF.Sin(phi);
+
+                    Color* rowPtr = pixels + (y * Width);
+
+                    for (int x = 0; x < Width; x++)
                     {
-                        int idx = py * Width + px;
-                        Vector3 point = GetPointAtPixel(px, py);
+                        // Optimization: Vector3 ctor without trig calls
+                        Vector3 point = new Vector3(
+                            radius_at_y * lonCos[x],
+                            y_3d,
+                            radius_at_y * lonSin[x]
+                        );
 
-                        // 1. Unwarped (Geometric Truth)
-                        int idUnwarped = _map!.Subtiles.GetSubtileId(point);
+                        // Geometric Lookup Only (No Warp on CPU)
+                        int id = _map!.Subtiles.GetSubtileId(point);
 
-                        // 2. Warped (Organic)
-                        Vector3 warpedPoint = _map!.Subtiles.WarpPoint(point);
-                        int idWarped = _map!.Subtiles.GetSubtileId(warpedPoint);
-
-                        // Helper to encode ID
-                        Color Encode(int id) => new Color(
+                        // Inline Encoding
+                        rowPtr[x] = new Color(
                             (byte)(id & 0xFF),
                             (byte)((id >> 8) & 0xFF),
                             (byte)((id >> 16) & 0xFF),
                             (byte)255
                         );
-
-                        pixelsUnwarped[idx] = Encode(idUnwarped);
-                        pixelsWarped[idx] = Encode(idWarped);
                     }
                 });
 
-                // Upload to GPU
-                Raylib.UpdateTexture(_lutTextureWarped, _lutImageWarped.Data);
-                Raylib.UpdateTexture(_lutTextureUnwarped, _lutImageUnwarped.Data);
+                Raylib.UpdateTexture(_lutTexture, _lutImage.Data);
             }
         }
 
@@ -305,41 +327,36 @@ namespace Aethelgard.Rendering
         /// <summary>
         /// Draws the map using the Shader.
         /// </summary>
+
         public void Draw(int x, int y, int w, int h)
         {
             if (!_initialized) return;
 
-            // Set Shader Uniforms
             Raylib.BeginShaderMode(_shader);
 
-            // Texture Unit 0 is standard texturing
-            // We need to bind Value Texture to another unit?
-            // Actually Raylib's BeginShaderMode implies the NEXT draw call uses the shader.
-            // We can set sampler uniforms if we manage units, but simpler to rely on default behavior
-            // if we can pass textures. Raylib handling of multiple textures involves `rlActiveTextureSlot`.
-            // But simpler approach:
-
-            // Raylib Shader binding for multiple textures:
-            // 1. Activate Slot 0, Bind LUT.
-            // 2. Activate Slot 1, Bind Value.
-            // 3. Set Uniforms for locLut=0, locValue=1. (This is GL style).
-            // In Raylib_cs, simpler to:
-
-            Texture2D lutToBind = ShouldUseWarpedLut() ? _lutTextureWarped : _lutTextureUnwarped;
-
-            Raylib.SetShaderValueTexture(_shader, _locLutTexture, lutToBind);
+            Raylib.SetShaderValueTexture(_shader, _locLutTexture, _lutTexture);
             Raylib.SetShaderValueTexture(_shader, _locValueTexture, _valueTexture);
 
             int sCount = _map!.Subtiles.SubtileCount;
             int sSize = _valueImage.Width;
             int useRamp = 0; // 0 = Direct Color
 
+            // Warp Uniforms
+            bool warp = ShouldUseWarp();
+            float nScale = _map.Subtiles.NoiseScale;
+            float wStr = _map.Subtiles.WarpStrength;
+
             Raylib.SetShaderValue(_shader, _locSubtileCount, sCount, ShaderUniformDataType.Int);
             Raylib.SetShaderValue(_shader, _locValueTextureSize, sSize, ShaderUniformDataType.Int);
             Raylib.SetShaderValue(_shader, _locUseRamp, useRamp, ShaderUniformDataType.Int);
 
+            Raylib.SetShaderValue(_shader, _locNoiseScale, nScale, ShaderUniformDataType.Float);
+            Raylib.SetShaderValue(_shader, _locWarpStrength, wStr, ShaderUniformDataType.Float);
+            Raylib.SetShaderValue(_shader, _locWarpEnabled, warp ? 1 : 0, ShaderUniformDataType.Int);
+            Raylib.SetShaderValue(_shader, _locLutSize, new Vector2(Width, Height), ShaderUniformDataType.Vec2);
+
             Raylib.DrawTexturePro(
-                lutToBind,
+                _lutTexture,
                 new Rectangle(0, 0, Width, Height),
                 new Rectangle(x, y, w, h),
                 Vector2.Zero,
@@ -354,24 +371,31 @@ namespace Aethelgard.Rendering
         {
             if (!_initialized) return;
 
-            // Set Shader Uniforms
             Raylib.BeginShaderMode(_shader);
 
-            Texture2D lutToBind = ShouldUseWarpedLut() ? _lutTextureWarped : _lutTextureUnwarped;
-
-            Raylib.SetShaderValueTexture(_shader, _locLutTexture, lutToBind);
+            Raylib.SetShaderValueTexture(_shader, _locLutTexture, _lutTexture);
             Raylib.SetShaderValueTexture(_shader, _locValueTexture, _valueTexture);
 
             int sCount = _map!.Subtiles.SubtileCount;
             int sSize = _valueImage.Width;
             int useRamp = 0; // 0 = Direct Color
 
+            // Warp Uniforms
+            bool warp = ShouldUseWarp();
+            float nScale = _map.Subtiles.NoiseScale;
+            float wStr = _map.Subtiles.WarpStrength;
+
             Raylib.SetShaderValue(_shader, _locSubtileCount, sCount, ShaderUniformDataType.Int);
             Raylib.SetShaderValue(_shader, _locValueTextureSize, sSize, ShaderUniformDataType.Int);
             Raylib.SetShaderValue(_shader, _locUseRamp, useRamp, ShaderUniformDataType.Int);
 
+            Raylib.SetShaderValue(_shader, _locNoiseScale, nScale, ShaderUniformDataType.Float);
+            Raylib.SetShaderValue(_shader, _locWarpStrength, wStr, ShaderUniformDataType.Float);
+            Raylib.SetShaderValue(_shader, _locWarpEnabled, warp ? 1 : 0, ShaderUniformDataType.Int);
+            Raylib.SetShaderValue(_shader, _locLutSize, new Vector2(Width, Height), ShaderUniformDataType.Vec2);
+
             Raylib.DrawTexturePro(
-                lutToBind,
+                _lutTexture,
                 sourceRect,
                 destRect,
                 Vector2.Zero,
@@ -382,10 +406,11 @@ namespace Aethelgard.Rendering
             Raylib.EndShaderMode();
         }
 
-        private bool ShouldUseWarpedLut()
+        private bool ShouldUseWarp()
         {
             // Organic/Terrain modes use warped lookups (visual noise)
-            // Data/Debug/Geometric modes use raw geometric lookups (perfect faces)
+            // Data/Debug/Geometric modes use raw geometric lookups
+            // BUT now this is handled in shader via uniforms
             return CurrentMode == RenderMode.Elevation ||
                    CurrentMode == RenderMode.Subtiles ||
                    CurrentMode == RenderMode.SubtileNoise;
@@ -519,10 +544,8 @@ namespace Aethelgard.Rendering
         {
             if (_initialized)
             {
-                Raylib.UnloadTexture(_lutTextureWarped);
-                Raylib.UnloadTexture(_lutTextureUnwarped);
-                Raylib.UnloadImage(_lutImageWarped);
-                Raylib.UnloadImage(_lutImageUnwarped);
+                Raylib.UnloadTexture(_lutTexture);
+                Raylib.UnloadImage(_lutImage);
                 Raylib.UnloadTexture(_valueTexture);
                 Raylib.UnloadImage(_valueImage);
                 Raylib.UnloadShader(_shader);

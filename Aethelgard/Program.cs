@@ -31,8 +31,8 @@ class Program
         // ═══════════════════════════════════════════════════════════════
         int resolution = 50;
         int seed = 12345;
-        int renderWidth = 21600;   // Very high res for large subtiles
-        int renderHeight = 10800;
+        int renderWidth = 10800;   // Very high res for large subtiles
+        int renderHeight = 5600;
 
         // Current render mode
         int currentModeIndex = 0;
@@ -44,8 +44,8 @@ class Program
         float noiseStrength = 1.0f;
 
         // Subtile parameters (persistent for slider state)
-        float subtileWarpStrength = 0.015f;
-        float subtileNoiseScale = 35.7f;
+        float subtileWarpStrength = 0.002f;
+        float subtileNoiseScale = 100.0f;
         float subtileDetailStrength = 100.0f;
         int subtileResolution = 4;
         bool showSubtileBorders = false;
@@ -55,12 +55,14 @@ class Program
         // Camera State
         // ═══════════════════════════════════════════════════════════════
         float zoom = 1.0f;
+        float targetZoom = 1.0f; // For smooth zooming
         float zoomMin = 0.25f;   // Allow zooming out more
-        float zoomMax = 32.0f;   // Allow high zoom
+        float zoomMax = 128.0f;   // Allow high zoom (was 32.0)
         float zoomSpeed = 0.1f;
+        float zoomSmoothTime = 10.0f; // Higher = Snappier
 
         Vector2 panOffset = Vector2.Zero;  // Pan in texture coordinates
-        float panSpeed = 300f;             // Pixels per second for WASD
+        float panSpeed = 1500f;             // Pixels per second for WASD (Increased 5x from 300)
         bool isDragging = false;
         Vector2 dragStart = Vector2.Zero;
         Vector2 panAtDragStart = Vector2.Zero;
@@ -98,10 +100,16 @@ class Program
                 float wheel = Raylib.GetMouseWheelMove();
                 if (wheel != 0)
                 {
-                    zoom += wheel * zoomSpeed * zoom;  // Proportional zoom
-                    zoom = Math.Clamp(zoom, zoomMin, zoomMax);
+                    targetZoom += wheel * zoomSpeed * targetZoom;  // Proportional zoom
+                    targetZoom = Math.Clamp(targetZoom, zoomMin, zoomMax);
                 }
             }
+
+            // Smooth Interpolation
+            zoom = Lerp(zoom, targetZoom, dt * zoomSmoothTime);
+
+            // Helper for Lerp
+            float Lerp(float a, float b, float t) => a + (b - a) * t;
 
             // Pan with mouse drag
             if (!imguiWantsMouse)
@@ -139,6 +147,7 @@ class Program
                 if (Raylib.IsKeyPressed(KeyboardKey.R))
                 {
                     zoom = 1.0f;
+                    targetZoom = 1.0f;
                     panOffset = Vector2.Zero;
                 }
             }
@@ -399,7 +408,7 @@ class Program
 
             bool subtileChanged = false;
 
-            if (ImGui.SliderFloat("Warp Strength", ref subtileWarpStrength, 0.0f, 0.1f, "%.3f"))
+            if (ImGui.SliderFloat("Warp Strength", ref subtileWarpStrength, 0.0f, 0.05f, "%.4f"))
             {
                 // Preview change but don't apply yet
             }
