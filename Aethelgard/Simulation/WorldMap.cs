@@ -64,17 +64,66 @@ namespace Aethelgard.Simulation
         /// <param name="plateCount">Number of plates to generate (4-20 typical).</param>
         /// <param name="continentalRatio">Fraction of plates that are continental (0-1).</param>
         /// <param name="noiseStrength">Strength of noise for plate boundary irregularity.</param>
-        public void GenerateTectonics(int plateCount = 12, float continentalRatio = 0.4f, float noiseStrength = 1.0f)
+        public void GenerateTectonics(
+            int plateCount = 12,
+            float continentalRatio = 0.4f,
+            float noiseStrength = 1.0f,
+            // Stack A (Base)
+            float noiseAScale = 0.15f,
+            float noiseAPersistence = 0.5f,
+            float noiseALacunarity = 2.0f,
+            float noiseAWeight = 1.0f,
+            // Stack B (Detail)
+            float noiseBScale = 0.5f,
+            float noiseBPersistence = 0.5f,
+            float noiseBLacunarity = 2.0f,
+            float noiseBWeight = 1.0f,
+            // Distance Penalty
+            // Distance Penalty
+            float distancePenalty = 0.5f,
+            // Domain Warping
+            float noiseWarping = 2.0f,
+            // Microplates
+            int microplatesPerPlate = 3
+        )
         {
             var generator = new PlateGenerator(this, Seed)
             {
                 PlateCount = plateCount,
                 ContinentalRatio = continentalRatio,
-                NoiseStrength = noiseStrength
+                NoiseStrength = noiseStrength,
+
+                NoiseAScale = noiseAScale,
+                NoiseAPersistence = noiseAPersistence,
+                NoiseALacunarity = noiseALacunarity,
+                NoiseAWeight = noiseAWeight,
+
+                NoiseBScale = noiseBScale,
+                NoiseBPersistence = noiseBPersistence,
+                NoiseBLacunarity = noiseBLacunarity,
+                NoiseBWeight = noiseBWeight,
+
+                DistancePenalty = distancePenalty,
+                NoiseWarping = noiseWarping
             };
 
             generator.Generate();
+            generator.GenerateMicroplates(microplatesPerPlate);
             Plates = generator.Plates;
+
+            // Step 2: Refine Boundaries using Subtile System (High Resolution)
+            // We recreate the noise instances to match PlateGenerator's logic
+            // providing consistent "Micro Noise" at the subtile level.
+            var noiseA = new FractalNoise(Seed + 1000, 6, noiseAPersistence, noiseALacunarity, noiseAScale);
+            var noiseB = new FractalNoise(Seed + 2000, 8, noiseBPersistence, noiseBLacunarity, noiseBScale);
+
+            Subtiles.RefinePlateBoundaries(
+                Plates,
+                noiseA, noiseAWeight,
+                noiseB, noiseBWeight,
+                noiseStrength,
+                distancePenalty
+            );
         }
 
         /// <summary>

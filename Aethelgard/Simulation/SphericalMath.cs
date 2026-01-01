@@ -13,6 +13,21 @@ namespace Aethelgard.Simulation
         private const float RAD_TO_DEG = (float)(180.0 / Math.PI);
 
         /// <summary>
+        /// Generates a deterministic 3D offset for a given plate ID.
+        /// Decorrelates noise sampling positions to avoid directional bias.
+        /// </summary>
+        public static System.Numerics.Vector3 GetDecorrelatedPlateOffset(int plateId)
+        {
+            // Simple hash-based offset (don't need crypto quality, just dispersion)
+            // Use local Random with invariant seed based on ID
+            var rng = new Random(plateId * 73856093 ^ 19349663);
+            float x = (float)rng.NextDouble() * 1000f; // Large offsets to avoid repeating
+            float y = (float)rng.NextDouble() * 1000f;
+            float z = (float)rng.NextDouble() * 1000f;
+            return new System.Numerics.Vector3(x, y, z);
+        }
+
+        /// <summary>
         /// Convert pixel coordinates to latitude/longitude.
         /// X maps to longitude (-180 to 180), Y maps to latitude (90 to -90).
         /// </summary>

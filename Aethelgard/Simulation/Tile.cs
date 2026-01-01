@@ -164,6 +164,9 @@ namespace Aethelgard.Simulation
         /// <summary>Bitfield for various tile states. See TileFlags enum.</summary>
         public TileFlags Flags;
 
+        /// <summary>Debug/visualization value (raw float).</summary>
+        public float DebugValue;
+
         /// <summary>Debug/visualization marker (3 bytes RGB).</summary>
         public uint DebugMarker;
 

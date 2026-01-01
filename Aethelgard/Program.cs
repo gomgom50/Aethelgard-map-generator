@@ -41,10 +41,29 @@ class Program
         // Tectonics parameters
         int plateCount = 12;
         float continentalRatio = 0.4f;
-        float noiseStrength = 1.0f;
+        // Tectonics / Noise Defaults
+        // Tuned for "Organic Wobbly Continents" (breaking straight lines)
+        float noiseStrength = 0.5f;     // Increased to warp shapes more
+        // Stack A (Base - Continents)
+        float noiseAScale = 0.8f;       // Reduced to affect global shape
+        float noiseAPersistence = 0.5f;
+        float noiseALacunarity = 2.0f;
+        float noiseAWeight = 1.0f;
+
+        // Stack B (Detail - Coastlines)
+        float noiseBScale = 5.0f;       // High detail
+        float noiseBPersistence = 0.5f;
+        float noiseBLacunarity = 2.0f;
+        float noiseBWeight = 0.15f;     // Lower weight relative to A (since A is stronger)
+
+        // Distance Penalty (Low = organic, High = circular)
+        // Distance Penalty (Low = organic, High = circular)
+        float distancePenalty = 1.0f; // Stronger distance field
+        float noiseWarping = 2.0f; // Default warp strength
+        int microplatesPerPlate = 3; // Number of terranes per plate
 
         // Subtile parameters (persistent for slider state)
-        float subtileWarpStrength = 0.002f;
+        float subtileWarpStrength = 0.0025f;
         float subtileNoiseScale = 100.0f;
         float subtileDetailStrength = 100.0f;
         int subtileResolution = 4;
@@ -73,6 +92,9 @@ class Program
         WorldMap map = new WorldMap(resolution, seed);
         MapRenderer renderer = new MapRenderer();
         renderer.Initialize(renderWidth, renderHeight, map);
+
+        // Apply subtile config from UI slider defaults on startup
+        map.Subtiles?.UpdateConfig(subtileNoiseScale, subtileWarpStrength, subtileDetailStrength);
 
         // Map viewport (screen rectangle where map is drawn)
         Rectangle mapViewport = new Rectangle(50, 50, 900, 450);
@@ -374,6 +396,10 @@ class Program
                 renderer.Dispose();
                 renderer = new MapRenderer();
                 renderer.Initialize(renderWidth, renderHeight, map);
+
+                // Apply subtile config from UI sliders (fixes issue where defaults weren't synced)
+                map.Subtiles?.UpdateConfig(subtileNoiseScale, subtileWarpStrength, subtileDetailStrength);
+
                 statusMessage = $"World regenerated: {map.Topology.TileCount:N0} tiles";
             }
 
@@ -392,13 +418,49 @@ class Program
             // Tectonics Controls
             ImGui.Text("Tectonics (Phase 1)");
 
-            ImGui.SliderInt("Plate Count", ref plateCount, 4, 20);
-            ImGui.SliderFloat("Continental Ratio", ref continentalRatio, 0.2f, 0.7f, "%.2f");
-            ImGui.SliderFloat("Noise Strength", ref noiseStrength, 0.2f, 2.0f, "%.1f");
+            ImGui.SliderInt("Plate Count", ref plateCount, 4, 30);
+            ImGui.SliderFloat("Continental Ratio", ref continentalRatio, 0.1f, 0.9f, "%.2f");
+            ImGui.SliderFloat("Noise Strength", ref noiseStrength, 0.1f, 50.0f, "%.1f");
+
+            // Advanced Noise Settings
+            // Sliders defined with wide ranges for extreme testing
+            ImGui.Text("Noise Stack A (Base)");
+            ImGui.PushItemWidth(250f); // Make sliders wider as requested
+            ImGui.SliderFloat("Scale A", ref noiseAScale, 0.001f, 10.0f, "%.4f");
+            ImGui.SliderFloat("Pers A", ref noiseAPersistence, 0.1f, 20.0f, "%.2f");
+            ImGui.SliderFloat("Lac A", ref noiseALacunarity, 1.0f, 50.0f, "%.2f");
+            ImGui.SliderFloat("Weight A", ref noiseAWeight, 0.0f, 100.0f, "%.1f");
+
+            ImGui.Text("Noise Stack B (Detail)");
+            ImGui.SliderFloat("Scale B", ref noiseBScale, 0.1f, 50.0f, "%.3f");
+            ImGui.SliderFloat("Pers B", ref noiseBPersistence, 0.1f, 20.0f, "%.2f");
+            ImGui.SliderFloat("Lac B", ref noiseBLacunarity, 1.0f, 50.0f, "%.2f");
+            ImGui.SliderFloat("Weight B", ref noiseBWeight, 0.0f, 100.0f, "%.1f");
+
+            ImGui.Text("Distance Penalty");
+            ImGui.SliderFloat("Dist Penalty", ref distancePenalty, 0.0f, 2.0f, "%.3f");
+            ImGui.SliderFloat("Warping", ref noiseWarping, 0.0f, 5.0f, "%.2f");
+            ImGui.SliderInt("uPlates/Plate", ref microplatesPerPlate, 0, 10);
+            ImGui.PopItemWidth();
 
             if (ImGui.Button("Generate Tectonics"))
             {
-                map?.GenerateTectonics(plateCount, continentalRatio, noiseStrength);
+                map?.GenerateTectonics(
+                    plateCount,
+                    continentalRatio,
+                    noiseStrength,
+
+                    // Stack A
+                    noiseAScale, noiseAPersistence, noiseALacunarity, noiseAWeight,
+
+                    // Stack B
+                    noiseBScale, noiseBPersistence, noiseBLacunarity, noiseBWeight,
+
+                    // Modifiers
+                    distancePenalty,
+                    noiseWarping,
+                    microplatesPerPlate
+                );
                 renderer.IsDirty = true;
                 statusMessage = $"Tectonics generated: {map?.Plates?.Length ?? 0} plates";
             }

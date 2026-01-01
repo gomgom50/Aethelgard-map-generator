@@ -59,6 +59,8 @@ namespace Aethelgard.Rendering
             RockType,       // Color by bedrock type
             Subtiles,       // distinct random colors for each tile (stained glass look)
             SubtileNoise,   // Debug: Subtile System Noise Pattern (Special case, heavy calc)
+            PlateNoise,      // Debug: Plate Generation Score (from DebugValue)
+            Microplates     // Color by microplate/terranes ID
         }
 
         /// <summary>Current visualization mode.</summary>
@@ -303,14 +305,25 @@ namespace Aethelgard.Rendering
                         color = new Color(
                             (byte)(Math.Clamp(noise.X * 0.5f + 0.5f, 0, 1) * 255),
                             (byte)(Math.Clamp(noise.Y * 0.5f + 0.5f, 0, 1) * 255),
-                            (byte)(Math.Clamp(noise.Z * 0.5f + 0.5f, 0, 1) * 255),
+                (byte)(Math.Clamp(noise.Z * 0.5f + 0.5f, 0, 1) * 255),
                             (byte)255
                         );
                     }
                     else
                     {
                         // Parent Tile based modes
-                        int pId = _map.Subtiles.GetParentTile(sId);
+                        // TileId and Face need GEOMETRIC parent (pure topology, not affected by tectonics)
+                        // Other modes need REFINED parent (plate ownership after flood fill)
+                        int pId;
+                        if (CurrentMode == RenderMode.TileId || CurrentMode == RenderMode.Face)
+                        {
+                            pId = _map.Subtiles.GetGeometricParentTile(sId);
+                        }
+                        else
+                        {
+                            pId = _map.Subtiles.GetParentTile(sId);
+                        }
+
                         if (pId >= 0 && tileColors != null && pId < tileColors.Length)
                             color = tileColors[pId];
                         else
@@ -410,10 +423,9 @@ namespace Aethelgard.Rendering
         {
             // Organic/Terrain modes use warped lookups (visual noise)
             // Data/Debug/Geometric modes use raw geometric lookups
-            // BUT now this is handled in shader via uniforms
-            return CurrentMode == RenderMode.Elevation ||
-                   CurrentMode == RenderMode.Subtiles ||
-                   CurrentMode == RenderMode.SubtileNoise;
+            // Exclude strictly debug/geometric modes
+            return CurrentMode != RenderMode.TileId &&
+                   CurrentMode != RenderMode.Face;
         }
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -454,6 +466,8 @@ namespace Aethelgard.Rendering
                 RenderMode.CrustAge => GetColorForCrustAge(tile.CrustAge),
                 RenderMode.CrustType => tile.CrustType == 1 ? new Color(180, 140, 100, 255) : new Color(40, 80, 140, 255),
                 RenderMode.RockType => GetColorForRockType(tile.RockType),
+                RenderMode.PlateNoise => GetColorForPlateNoise(tile.DebugValue),
+                RenderMode.Microplates => GetColorForMicroplateId(tile.MicroplateId),
                 _ => Color.Magenta
             };
         }
@@ -496,6 +510,7 @@ namespace Aethelgard.Rendering
         }
 
         private static Color GetColorForPlateId(int plateId) => plateId < 0 ? new Color(50, 50, 50, 255) : GetColorForTileId(plateId * 17);
+        private static Color GetColorForMicroplateId(int id) => id < 0 ? new Color(30, 30, 30, 255) : GetColorForTileId(id * 31);
 
         private static Color GetColorForBoundaryType(BoundaryType bt) => bt switch
         {
@@ -514,6 +529,19 @@ namespace Aethelgard.Rendering
             RockType.Limestone => new Color(220, 220, 200, 255),
             _ => new Color(100, 100, 100, 255) // Valid fallback
         };
+
+        private static Color GetColorForPlateNoise(float val)
+        {
+            // Normalize val (approx -2 to +2 range) to 0-1
+            float t = (val + 2f) / 4f;
+            t = Math.Clamp(t, 0f, 1f);
+
+            // Continuous "Turbo"-like ramp: Blue -> Cyan -> Green -> Yellow -> Red
+            if (t < 0.25f) return LerpColor(Color.Blue, new Color(0, 255, 255, 255), t * 4f);
+            if (t < 0.5f) return LerpColor(new Color(0, 255, 255, 255), Color.Green, (t - 0.25f) * 4f);
+            if (t < 0.75f) return LerpColor(Color.Green, Color.Yellow, (t - 0.5f) * 4f);
+            return LerpColor(Color.Yellow, Color.Red, (t - 0.75f) * 4f);
+        }
 
         private static Color LerpColor(Color a, Color b, float t)
         {

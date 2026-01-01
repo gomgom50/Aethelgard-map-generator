@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Threading.Tasks;
 using Aethelgard.Simulation.Core;
 
 namespace Aethelgard.Simulation.Algorithms
@@ -48,6 +49,201 @@ namespace Aethelgard.Simulation.Algorithms
         }
 
         /// <summary>
+        /// Fractal Flood Fill for plate generation (Simplex Noise Overload).
+        /// Uses SimplexNoise for organic, grid-artifact-free shapes.
+        /// </summary>
+        public static void Fractal(
+            WorldMap map,
+            List<int> seeds,
+            int[] outputOwnerMap,
+            SimplexNoise noiseA,
+            SimplexNoise noiseB,
+            float weightA = 1.0f,
+            float weightB = 1.0f,
+            float noiseStrength = 1.0f,
+            int[]? plateQuotas = null,
+            float distancePenaltyWeight = 0.5f,
+            float warpStrength = 0.0f,
+            Func<int, int, bool>? constraint = null)
+        {
+            Console.WriteLine($"[FloodFill.Fractal] Starting (Simplex) with {seeds.Count} seeds, {map.Topology.TileCount} tiles");
+            Console.WriteLine($"[FloodFill.Fractal] Params: weightA={weightA:F2}, weightB={weightB:F2}, noiseStrength={noiseStrength:F2}, distPenalty={distancePenaltyWeight:F2}, warp={warpStrength:F2}");
+
+            // PQ stores (TileId, OwnerId) with priority = -score
+            var pq = new PriorityQueue<(int Tile, int Owner), float>();
+            long constraintsHit = 0;
+
+            // Optimization: Precompute positions (Sync to avoid thread pool deadlocks)
+            int tileCount = map.Topology.TileCount;
+            Vector3[] tilePositions = new Vector3[tileCount];
+            for (int i = 0; i < tileCount; i++)
+            {
+                var (lat, lon) = map.Topology.GetTileCenter(i);
+                tilePositions[i] = SphericalMath.LatLonToHypersphere(lon, lat);
+            }
+
+            // Compute plate centers (for distance penalty)
+            var plateCenters = new Vector3[seeds.Count];
+            for (int i = 0; i < seeds.Count; i++)
+            {
+                if (seeds[i] < 0 || seeds[i] >= tileCount)
+                {
+                    Console.WriteLine($"[FloodFill.Fractal] FATAL: Plate {i} has invalid seed tile ID {seeds[i]}");
+                    throw new ArgumentException($"Invalid seed tile ID {seeds[i]} for plate {i}.");
+                }
+                plateCenters[i] = tilePositions[seeds[i]];
+            }
+
+            // Quotas (Target sizes)
+            if (plateQuotas == null)
+            {
+                plateQuotas = new int[seeds.Count];
+                int fairShare = map.Topology.TileCount / seeds.Count;
+                Array.Fill(plateQuotas, fairShare);
+            }
+
+            // Track current size
+            int[] currentCounts = new int[seeds.Count];
+            int totalAssigned = seeds.Count; // Seeds are pre-assigned
+            int totalQuota = 0;
+            foreach (var q in plateQuotas) totalQuota += q;
+            int targetTiles = Math.Min(totalQuota, tileCount);
+
+            // Optimization: Precompute Decorrelated Offsets
+            Vector3[] plateOffsets = new Vector3[seeds.Count];
+            for (int i = 0; i < seeds.Count; i++)
+            {
+                plateOffsets[i] = SphericalMath.GetDecorrelatedPlateOffset(i);
+            }
+
+            // 1. Initialize Seeds
+            for (int i = 0; i < seeds.Count; i++)
+            {
+                int seed = seeds[i];
+                int owner = i;
+
+                if (outputOwnerMap[seed] == -1)
+                {
+                    outputOwnerMap[seed] = owner;
+                }
+                else if (outputOwnerMap[seed] != owner)
+                {
+                    throw new System.InvalidOperationException($"Seed mismatch! Tile {seed} has owner {outputOwnerMap[seed]}, expected {owner}.");
+                }
+
+                if (outputOwnerMap[seed] == owner)
+                {
+                    currentCounts[owner] = 1;
+                }
+
+                var neighbors = map.Topology.GetNeighbors(seed);
+                foreach (int n in neighbors)
+                {
+                    if (outputOwnerMap[n] != -1) continue;
+
+                    Vector3 pos = tilePositions[n];
+                    Vector3 plateOffset = plateOffsets[owner];
+
+                    float n1 = noiseA.GetDomainWarpedNoise(pos.X + plateOffset.X, pos.Y + plateOffset.Y, pos.Z + plateOffset.Z, warpStrength);
+                    float n2 = noiseB.GetDomainWarpedNoise(pos.X + plateOffset.X + 0.5f, pos.Y + plateOffset.Y + 0.5f, pos.Z + plateOffset.Z + 0.5f, warpStrength);
+                    float noiseScore = (n1 * weightA + n2 * weightB) * noiseStrength;
+
+                    float dist = Vector3.Distance(pos, plateCenters[owner]);
+                    float distScore = -dist * distancePenaltyWeight;
+                    float finalScore = noiseScore + distScore;
+
+                    pq.Enqueue((n, owner), -finalScore);
+                }
+            }
+
+            // 2. Expansion Loop
+            int iterations = 0;
+            // Add existing expansion logic specifically for the new overload
+            while (pq.TryDequeue(out var item, out float negScore))
+            {
+                iterations++;
+                if (totalAssigned >= targetTiles) break;
+
+                int current = item.Tile;
+                int owner = item.Owner;
+
+                if (currentCounts[owner] >= plateQuotas[owner]) continue;
+                if (currentCounts[owner] >= plateQuotas[owner]) continue;
+                if (constraint != null && !constraint(owner, current))
+                {
+                    constraintsHit++;
+                    continue;
+                }
+                if (outputOwnerMap[current] != -1 && outputOwnerMap[current] != owner) continue;
+                if (outputOwnerMap[current] == owner) continue;
+
+                outputOwnerMap[current] = owner;
+                currentCounts[owner]++;
+                totalAssigned++;
+
+                var neighbors = map.Topology.GetNeighbors(current);
+                foreach (int n in neighbors)
+                {
+                    if (outputOwnerMap[n] != -1) continue;
+                    if (constraint != null && !constraint(owner, n))
+                    {
+                        constraintsHit++;
+                        continue;
+                    }
+
+                    Vector3 pos = tilePositions[n];
+                    Vector3 plateOffset = plateOffsets[owner];
+
+                    float n1 = noiseA.GetDomainWarpedNoise(pos.X + plateOffset.X, pos.Y + plateOffset.Y, pos.Z + plateOffset.Z, warpStrength);
+                    float n2 = noiseB.GetDomainWarpedNoise(pos.X + plateOffset.X + 0.5f, pos.Y + plateOffset.Y + 0.5f, pos.Z + plateOffset.Z + 0.5f, warpStrength);
+                    float noiseScore = (n1 * weightA + n2 * weightB) * noiseStrength;
+
+                    float dist = Vector3.Distance(pos, plateCenters[owner]);
+                    float distScore = -dist * distancePenaltyWeight;
+                    float finalScore = noiseScore + distScore;
+
+                    pq.Enqueue((n, owner), -finalScore);
+                }
+            }
+
+            // Cleanup pass
+            int orphans = 0;
+            for (int i = 0; i < tileCount; i++)
+            {
+                if (outputOwnerMap[i] == -1)
+                {
+                    orphans++;
+                    float minDist = float.MaxValue;
+                    int bestOwner = -1;
+                    Vector3 pos = tilePositions[i];
+                    for (int p = 0; p < seeds.Count; p++)
+                    {
+                        float d = Vector3.DistanceSquared(pos, plateCenters[p]);
+                        if (d < minDist)
+                        {
+                            // Validate constraint before considering
+                            if (constraint == null || constraint(p, i))
+                            {
+                                minDist = d;
+                                bestOwner = p;
+                            }
+                        }
+                    }
+                    if (bestOwner != -1)
+                    {
+                        outputOwnerMap[i] = bestOwner;
+                        currentCounts[bestOwner]++;
+                    }
+                }
+            }
+            // Log constraint stats if any
+            if (constraint != null)
+            {
+                Console.WriteLine($"[FloodFill.Fractal] Constraints blocked {constraintsHit} expansions.");
+            }
+        }
+
+        /// <summary>
         /// Fractal Flood Fill for plate generation.
         /// Priority-Queue based expansion with scoring per Gleba spec:
         /// - Fractal noise for irregular shapes
@@ -58,114 +254,248 @@ namespace Aethelgard.Simulation.Algorithms
             WorldMap map,
             List<int> seeds,
             int[] outputOwnerMap,
-            FractalNoise noise,
+            FractalNoise noiseA,
+            FractalNoise noiseB,
+            float weightA = 1.0f,
+            float weightB = 1.0f,
             float noiseStrength = 1.0f,
-            float[]? plateWeights = null,
+            int[]? plateQuotas = null,
             float distancePenaltyWeight = 0.5f)
         {
-            // PQ stores (TileId, OwnerId) with priority = -score (lower priority = higher score)
+            Console.WriteLine($"[FloodFill.Fractal] Starting with {seeds.Count} seeds, {map.Topology.TileCount} tiles");
+            Console.WriteLine($"[FloodFill.Fractal] Params: weightA={weightA:F2}, weightB={weightB:F2}, noiseStrength={noiseStrength:F2}, distPenalty={distancePenaltyWeight:F2}");
+
+            // PQ stores (TileId, OwnerId) with priority = -score
             var pq = new PriorityQueue<(int Tile, int Owner), float>();
 
-            // Track best score per tile (we want max score, so use negative for min-heap)
-            float[] bestScores = TransientBufferPool<float>.Get(map.Topology.TileCount);
-            Array.Fill(bestScores, float.MinValue);
+            // Optimization: Precompute positions (Sync to avoid thread pool deadlocks)
+            int tileCount = map.Topology.TileCount;
+            // Use standard array to avoid Pool lock issues
+            Vector3[] tilePositions = new Vector3[tileCount];
+            for (int i = 0; i < tileCount; i++)
+            {
+                var (lat, lon) = map.Topology.GetTileCenter(i);
+                tilePositions[i] = SphericalMath.LatLonToHypersphere(lon, lat);
+            }
 
-            // Compute plate centers (average position of seed)
+            // Compute plate centers (for distance penalty)
             var plateCenters = new Vector3[seeds.Count];
             for (int i = 0; i < seeds.Count; i++)
             {
-                var (lat, lon) = map.Topology.GetTileCenter(seeds[i]);
-                plateCenters[i] = SphericalMath.LatLonToHypersphere(lon, lat);
+                if (seeds[i] < 0 || seeds[i] >= tileCount)
+                {
+                    Console.WriteLine($"[FloodFill.Fractal] FATAL: Plate {i} has invalid seed tile ID {seeds[i]} (valid: 0-{tileCount - 1})");
+                    throw new ArgumentException($"Invalid seed tile ID {seeds[i]} for plate {i}. Valid range is 0-{tileCount - 1}.");
+                }
+                plateCenters[i] = tilePositions[seeds[i]];
             }
 
-            // Default weights if not provided
-            if (plateWeights == null)
+            // Quotas (Target sizes)
+            if (plateQuotas == null)
             {
-                plateWeights = new float[seeds.Count];
-                Array.Fill(plateWeights, 1.0f);
+                plateQuotas = new int[seeds.Count];
+                int fairShare = map.Topology.TileCount / seeds.Count;
+                Array.Fill(plateQuotas, fairShare);
             }
 
-            // Seed with initial tiles
+            // Track current size
+            int[] currentCounts = new int[seeds.Count];
+            int totalAssigned = seeds.Count; // Seeds are pre-assigned
+            int totalQuota = 0;
+            foreach (var q in plateQuotas) totalQuota += q;
+            // Cap to actual tile count to avoid infinite loops
+            int targetTiles = Math.Min(totalQuota, tileCount);
+
+            Console.WriteLine($"[FloodFill.Fractal] Quotas: total={totalQuota}, target={targetTiles}, seeds pre-assigned={seeds.Count}");
+            for (int i = 0; i < plateQuotas.Length && i < seeds.Count; i++)
+            {
+                Console.WriteLine($"  Plate {i}: quota={plateQuotas[i]}, seed={seeds[i]}");
+            }
+
+            // Optimization: Precompute Decorrelated Offsets
+            // Avoids calling Random/Hash per neighbor
+            Vector3[] plateOffsets = new Vector3[seeds.Count];
+            for (int i = 0; i < seeds.Count; i++)
+            {
+                plateOffsets[i] = SphericalMath.GetDecorrelatedPlateOffset(i);
+            }
+
+            // 1. Initialize Seeds (Claim-at-Push for seeds to guarantee start)
             for (int i = 0; i < seeds.Count; i++)
             {
                 int seed = seeds[i];
-                int owner = outputOwnerMap[seed];
-                if (owner == -1) continue;
+                int owner = i;
 
-                bestScores[seed] = float.MaxValue; // Seeds always win
-                pq.Enqueue((seed, owner), float.MinValue); // Highest priority
+                // Sync with Caller's pre-fill
+                if (outputOwnerMap[seed] == -1)
+                {
+                    outputOwnerMap[seed] = owner;
+                }
+                else if (outputOwnerMap[seed] != owner)
+                {
+                    throw new System.InvalidOperationException($"Seed mismatch! Tile {seed} has owner {outputOwnerMap[seed]}, expected {owner}.");
+                }
+
+                // Ensure count is correct if we own it
+                if (outputOwnerMap[seed] == owner)
+                {
+                    currentCounts[owner] = 1;
+                }
+
+                // Enqueue seed's NEIGHBORS directly (seeds are already claimed)
+                var neighbors = map.Topology.GetNeighbors(seed);
+                Vector3 seedPos = tilePositions[seed];
+
+                foreach (int n in neighbors)
+                {
+                    if (outputOwnerMap[n] != -1) continue; // Skip if already claimed
+
+                    Vector3 pos = tilePositions[n];
+                    Vector3 plateOffset = plateOffsets[owner];
+
+                    float n1 = noiseA.GetNoise(pos.X + plateOffset.X, pos.Y + plateOffset.Y, pos.Z + plateOffset.Z);
+                    float n2 = noiseB.GetNoise(pos.X + plateOffset.X + 0.5f, pos.Y + plateOffset.Y + 0.5f, pos.Z + plateOffset.Z + 0.5f);
+                    float noiseScore = (n1 * weightA + n2 * weightB) * noiseStrength;
+
+                    float dist = Vector3.Distance(pos, plateCenters[owner]);
+                    float distScore = -dist * distancePenaltyWeight;
+                    float finalScore = noiseScore + distScore;
+
+                    pq.Enqueue((n, owner), -finalScore);
+                }
             }
 
-            while (pq.Count > 0)
+            Console.WriteLine($"[FloodFill.Fractal] Seeds initialized, queue size={pq.Count}");
+
+            // 2. Expansion Loop (Claim-at-Pop)
+            int iterations = 0;
+            int logInterval = Math.Max(1, targetTiles / 10); // Log every 10%
+            int lastLoggedAssigned = 0;
+
+            while (pq.TryDequeue(out var item, out float negScore))
             {
-                if (!pq.TryDequeue(out var item, out float negScore)) break;
+                iterations++;
+
+                // Early exit: All tiles assigned
+                if (totalAssigned >= targetTiles)
+                {
+                    Console.WriteLine($"[FloodFill.Fractal] Early exit: assigned {totalAssigned}/{targetTiles} tiles after {iterations} iterations");
+                    break;
+                }
+
+                // Progress logging (every 10%)
+                if (totalAssigned - lastLoggedAssigned >= logInterval)
+                {
+                    Console.WriteLine($"[FloodFill.Fractal] Progress: {totalAssigned}/{targetTiles} ({100f * totalAssigned / targetTiles:F1}%), queue size={pq.Count}, iterations={iterations}");
+                    lastLoggedAssigned = totalAssigned;
+                }
+
                 int current = item.Tile;
                 int owner = item.Owner;
 
-                // Skip if we've found a better path to this tile
-                if (-negScore < bestScores[current] - 0.001f) continue;
+                // Check Quota
+                if (currentCounts[owner] >= plateQuotas[owner]) continue;
 
-                // Claim tile
+                // If this tile is not the seed (already claimed), try to claim it
+                // Logic: 
+                // - If already claimed by US, we expand neighbors.
+                // - If unassigned, we CLAIM, then expand.
+                // - If claimed by OTHER, we stop.
+
+                if (outputOwnerMap[current] != -1 && outputOwnerMap[current] != owner)
+                    continue; // Lost to someone else
+
+                // If already claimed by us, skip - we already expanded this tile
+                if (outputOwnerMap[current] == owner)
+                    continue;
+
+                // Claim this tile
                 outputOwnerMap[current] = owner;
+                currentCounts[owner]++;
+                totalAssigned++;
 
+                // Expand to neighbors (only when we newly claim)
                 var neighbors = map.Topology.GetNeighbors(current);
                 foreach (int n in neighbors)
                 {
-                    // Skip already assigned tiles (in multi-source, first to claim wins)
+                    // Skip if neighbor already claimed (any owner)
                     if (outputOwnerMap[n] != -1) continue;
 
-                    // Calculate score for this tile from this plate
-                    var (lat, lon) = map.Topology.GetTileCenter(n);
-                    var pos = SphericalMath.LatLonToHypersphere(lon, lat);
+                    // Calculate score
+                    Vector3 pos = tilePositions[n];
 
-                    // 1. Fractal noise score (higher = more favorable)
-                    float nVal = noise.GetNoise(pos.X * 3f, pos.Y * 3f, pos.Z * 3f);
-                    float noiseScore = nVal * noiseStrength;
+                    // 1. Noise Offset (Decorrelated)
+                    Vector3 plateOffset = plateOffsets[owner];
 
-                    // 2. Distance penalty from plate center
+                    // Stack 1 (Base)
+                    float n1 = noiseA.GetNoise(pos.X + plateOffset.X, pos.Y + plateOffset.Y, pos.Z + plateOffset.Z);
+                    // Stack 2 (Detail)
+                    float n2 = noiseB.GetNoise(pos.X + plateOffset.X + 0.5f, pos.Y + plateOffset.Y + 0.5f, pos.Z + plateOffset.Z + 0.5f);
+
+                    float noiseScore = (n1 * weightA + n2 * weightB) * noiseStrength;
+
+                    // Distance Penalty
                     float dist = Vector3.Distance(pos, plateCenters[owner]);
                     float distScore = -dist * distancePenaltyWeight;
 
-                    // 3. Plate weight boost
-                    float weightScore = plateWeights[owner] * 0.1f;
+                    float finalScore = noiseScore + distScore;
 
-                    // Combined score
-                    float score = noiseScore + distScore + weightScore;
-
-                    if (score > bestScores[n])
-                    {
-                        bestScores[n] = score;
-                        pq.Enqueue((n, owner), -score); // Negate for min-heap
-                    }
+                    pq.Enqueue((n, owner), -finalScore);
                 }
             }
 
-            // Ensure ALL tiles are assigned (fallback for any unreached)
-            bool anyUnassigned = true;
-            int passes = 0;
-            while (anyUnassigned && passes < 50)
+            // CLEANUP PASS: Assign any remaining orphaned tiles to nearest plate
+            int orphanCount = 0;
+            for (int i = 0; i < tileCount; i++)
             {
-                anyUnassigned = false;
-                passes++;
-
-                for (int i = 0; i < map.Topology.TileCount; i++)
+                if (outputOwnerMap[i] == -1)
                 {
-                    if (outputOwnerMap[i] != -1) continue;
-                    anyUnassigned = true;
+                    orphanCount++;
 
-                    // Assign to first valid neighbor
-                    foreach (int n in map.Topology.GetNeighbors(i))
+                    // Find nearest plate by distance to plate center
+                    float bestDist = float.MaxValue;
+                    int bestPlate = 0;
+                    Vector3 tilePos = tilePositions[i];
+
+                    for (int p = 0; p < seeds.Count; p++)
                     {
-                        if (outputOwnerMap[n] != -1)
+                        float dist = Vector3.Distance(tilePos, plateCenters[p]);
+                        if (dist < bestDist)
                         {
-                            outputOwnerMap[i] = outputOwnerMap[n];
-                            break;
+                            bestDist = dist;
+                            bestPlate = p;
                         }
                     }
+
+                    outputOwnerMap[i] = bestPlate;
+                    currentCounts[bestPlate]++;
+                    totalAssigned++;
                 }
             }
 
-            TransientBufferPool<float>.Return(bestScores);
+            if (orphanCount > 0)
+            {
+                Console.WriteLine($"[FloodFill.Fractal] Cleanup: Assigned {orphanCount} orphaned tiles to nearest plates");
+            }
+
+            // Summary logging
+            Console.WriteLine($"[FloodFill.Fractal] Complete: {totalAssigned} tiles assigned in {iterations} iterations");
+            int unassigned = 0;
+            for (int i = 0; i < tileCount; i++)
+            {
+                if (outputOwnerMap[i] == -1) unassigned++;
+            }
+            if (unassigned > 0)
+            {
+                Console.WriteLine($"[FloodFill.Fractal] WARNING: {unassigned} tiles remain unassigned!");
+            }
+
+            Console.WriteLine("[FloodFill.Fractal] Per-plate counts:");
+            for (int i = 0; i < seeds.Count; i++)
+            {
+                int pct = (int)(100f * currentCounts[i] / targetTiles);
+                Console.WriteLine($"  Plate {i}: {currentCounts[i]} tiles ({pct}%), quota was {plateQuotas[i]}");
+            }
         }
 
         /// <summary>

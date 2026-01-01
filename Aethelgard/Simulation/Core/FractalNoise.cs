@@ -1,11 +1,11 @@
 using System;
+using System.Numerics;
 
 namespace Aethelgard.Simulation.Core
 {
     /// <summary>
     /// Instantiable Fractal Noise generator.
-    /// Replaces the static SimpleNoise with a seeded, object-oriented approach.
-    /// Implements the "Normalization" logic generic to Gleba's reference.
+    /// Corrected to prevent "Zero-Stacking" artifacts and Grid Alignment on spheres.
     /// </summary>
     public class FractalNoise
     {
@@ -15,7 +15,9 @@ namespace Aethelgard.Simulation.Core
         private readonly float _lacunarity;
         private readonly float _scale;
 
-        // Normalization factor pre-calculated to ensure result is roughly within [-1, 1]
+        // NEW: Specific offsets for every octave to prevent zero-crossing alignment
+        private readonly Vector3[] _octaveOffsets;
+
         private readonly float _normalization;
 
         public FractalNoise(int seed, int octaves, float persistence = 0.5f, float lacunarity = 2.0f, float scale = 0.01f)
@@ -24,9 +26,11 @@ namespace Aethelgard.Simulation.Core
             _persistence = persistence;
             _lacunarity = lacunarity;
             _scale = scale;
+            _octaveOffsets = new Vector3[octaves];
 
-            // Initialize Permutation Table with Seed
             var rnd = new Random(seed);
+
+            // 1. Initialize Permutation Table
             var p = new int[256];
             for (int i = 0; i < 256; i++) p[i] = i;
 
@@ -43,8 +47,19 @@ namespace Aethelgard.Simulation.Core
                 _perm[i] = p[i & 255];
             }
 
-            // Calculate Normalization Factor (Geometric Series Sum)
-            // Max Amplitude = 1 + p + p^2 + ... + p^(oct-1)
+            // 2. Generate Random Offsets per Octave
+            // We pick large offsets to move far away from the origin (0,0,0) where artifacts are worst.
+            // This ensures Octave 1's "grid lines" do not line up with Octave 2's.
+            for (int i = 0; i < _octaves; i++)
+            {
+                _octaveOffsets[i] = new Vector3(
+                    (float)(rnd.NextDouble() * 20000.0 - 10000.0),
+                    (float)(rnd.NextDouble() * 20000.0 - 10000.0),
+                    (float)(rnd.NextDouble() * 20000.0 - 10000.0)
+                );
+            }
+
+            // 3. Normalization
             float maxAmp = 0;
             float amp = 1;
             for (int i = 0; i < _octaves; i++)
@@ -61,12 +76,17 @@ namespace Aethelgard.Simulation.Core
             float frequency = 1;
             float amplitude = 1;
 
+            // Apply global scale
             float sx = x * _scale;
             float sy = y * _scale;
 
             for (int i = 0; i < _octaves; i++)
             {
-                total += ComputePerlin(sx * frequency, sy * frequency) * amplitude;
+                // Apply OCTAVE OFFSET
+                float ox = sx * frequency + _octaveOffsets[i].X;
+                float oy = sy * frequency + _octaveOffsets[i].Y;
+
+                total += ComputePerlin(ox, oy) * amplitude;
                 amplitude *= _persistence;
                 frequency *= _lacunarity;
             }
@@ -80,13 +100,28 @@ namespace Aethelgard.Simulation.Core
             float frequency = 1;
             float amplitude = 1;
 
-            float sx = x * _scale;
-            float sy = y * _scale;
-            float sz = z * _scale;
+            // DOMAIN ROTATION:
+            // Rotate the input coordinates slightly to misalign the noise grid 
+            // from the sphere's primary axes. This hides "Star Patterns" at poles.
+            // (Simple rotation around Z axis is usually enough to break the visual symmetry)
+            float rx = x * 0.8f + y * 0.6f;
+            float ry = y * 0.8f - x * 0.6f;
+            float rz = z;
+
+            // Apply global scale
+            float sx = rx * _scale;
+            float sy = ry * _scale;
+            float sz = rz * _scale;
 
             for (int i = 0; i < _octaves; i++)
             {
-                total += ComputePerlin(sx * frequency, sy * frequency, sz * frequency) * amplitude;
+                // Apply OCTAVE OFFSET
+                // Each layer samples a completely different part of infinite noise space
+                float ox = sx * frequency + _octaveOffsets[i].X;
+                float oy = sy * frequency + _octaveOffsets[i].Y;
+                float oz = sz * frequency + _octaveOffsets[i].Z;
+
+                total += ComputePerlin(ox, oy, oz) * amplitude;
                 amplitude *= _persistence;
                 frequency *= _lacunarity;
             }
@@ -102,10 +137,14 @@ namespace Aethelgard.Simulation.Core
             y -= (float)Math.Floor(y);
             float u = Fade(x);
             float v = Fade(y);
-            int A = _perm[X] + Y, AA = _perm[A], AB = _perm[A + 1];
-            int B = _perm[X + 1] + Y, BA = _perm[B], BB = _perm[B + 1];
-            return Lerp(v, Lerp(u, Grad(_perm[AA], x, y), Grad(_perm[BA], x - 1, y)),
-                           Lerp(u, Grad(_perm[AB], x, y - 1), Grad(_perm[BB], x - 1, y - 1)));
+
+            // Fixed Masking: Ensure (X+1) wraps correctly before array access
+            // Though _perm is 512, strict math relies on the 256 domain wrap
+            int A = (_perm[X] + Y) & 255;
+            int B = (_perm[X + 1] + Y) & 255;
+
+            return Lerp(v, Lerp(u, Grad(_perm[A], x, y), Grad(_perm[B], x - 1, y)),
+                           Lerp(u, Grad(_perm[A + 1], x, y - 1), Grad(_perm[B + 1], x - 1, y - 1)));
         }
 
         private float ComputePerlin(float x, float y, float z)
@@ -122,8 +161,16 @@ namespace Aethelgard.Simulation.Core
             float v = Fade(y);
             float w = Fade(z);
 
-            int A = _perm[X] + Y, AA = _perm[A] + Z, AB = _perm[A + 1] + Z;
-            int B = _perm[X + 1] + Y, BA = _perm[B] + Z, BB = _perm[B + 1] + Z;
+            // Fixed Hash Calculation with Masking
+            // Old code: int A = _perm[X] + Y; (Could result in 510, which is safe for array but wrong for noise tiling)
+            // New code: Mask immediately to ensure we stay in the 0-255 domain logic
+            int A = (_perm[X] + Y) & 255;
+            int B = (_perm[X + 1] + Y) & 255;
+
+            int AA = (_perm[A] + Z) & 255;
+            int AB = (_perm[A + 1] + Z) & 255;
+            int BA = (_perm[B] + Z) & 255;
+            int BB = (_perm[B + 1] + Z) & 255;
 
             return Lerp(w, Lerp(v, Lerp(u, Grad(_perm[AA], x, y, z), Grad(_perm[BA], x - 1, y, z)),
                                    Lerp(u, Grad(_perm[AB], x, y - 1, z), Grad(_perm[BB], x - 1, y - 1, z))),
@@ -144,10 +191,8 @@ namespace Aethelgard.Simulation.Core
 
         public float GetDomainWarpedNoise(float x, float y, float z, float warpStrength = 4.0f)
         {
-            // Domain Warping in 3D
-            // q = fbm(p)
-            // r = fbm(p + q*warp)
-            // fbm(p + r*warp)
+            // Note: Domain warping inherits the internal offsets from GetNoise,
+            // so this will also be fixed automatically.
 
             float qx = GetNoise(x, y, z);
             float qy = GetNoise(x + 5.2f, y + 1.3f, z + 2.8f);

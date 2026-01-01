@@ -30,7 +30,8 @@ namespace Aethelgard.Simulation.Systems
             public int Id1, Id2, Id3;
             public float W1, W2, W3;
             public float Noise;
-            public int WinnerId;
+            public int WinnerId;      // The MAIN TILE ID (for property lookups)
+            public int WinnerPlateId; // The PLATE ID (for map modes / borders)
         }
 
         private SubtileBlendData[] _blendCache = null!;
@@ -40,8 +41,9 @@ namespace Aethelgard.Simulation.Systems
         // But implicitly available via _blendCache[id].WinnerId
 
         // Configuration matching Gleba's "organic" look
-        private float _noiseScale = 100.0f;        // Scale of the 3D Noise Field (Higher = more wiggly)
-        private float _warpStrength = 0.002f;     // Magnitude of the 3D displacement
+        private float _noiseScale = 5.0f;        // Scale of the 3D Noise Field (Was 100.0f - too aliased!)
+
+        private float _warpStrength = 0.0025f;     // Magnitude of the 3D displacement
         private float _detailNoiseStrength = 100.0f; // Scale of the added height detail
 
         public float NoiseScale => _noiseScale;
@@ -189,6 +191,7 @@ namespace Aethelgard.Simulation.Systems
                     W2 = w2 / totalW,
                     W3 = w3 / totalW, // Normalize
                     WinnerId = id1,
+                    WinnerPlateId = -1, // Not known until RefinePlateBoundaries runs
                     Noise = detail * _detailNoiseStrength
                 };
             });
@@ -242,18 +245,139 @@ namespace Aethelgard.Simulation.Systems
             return _blendCache[subtileId].WinnerId;
         }
 
+        /// <summary>
+        /// Returns the pure geometry-based parent tile (closest by distance).
+        /// Unlike GetParentTile, this is NOT affected by warp or plate refinement.
+        /// Use for TileId render mode.
+        /// </summary>
+        public int GetGeometricParentTile(int subtileId)
+        {
+            if (subtileId < 0 || subtileId >= _blendCache.Length) return -1;
+            return _blendCache[subtileId].Id1;
+        }
+
         // Fast O(1) Elevation Lookup using Precomputed Weights
         public float GetSubtileElevation(int subtileId)
         {
             if (subtileId < 0 || subtileId >= _blendCache.Length) return 0f;
 
+            // Unify Elevation with Refined Plate Data
+            // Instead of blending coarse Main Tiles (which ignores our high-res border fix),
+            // we derive base elevation directly from the Winner ID (the refined plate owner).
+
             ref SubtileBlendData data = ref _blendCache[subtileId];
 
-            float h1 = _map.Tiles[data.Id1].Elevation;
-            float h2 = _map.Tiles[data.Id2].Elevation;
-            float h3 = _map.Tiles[data.Id3].Elevation;
+            // 1. Get Winner Plate From Cache directly (The true refined plate ID)
+            int winnerPlateId = data.WinnerPlateId;
 
-            return (h1 * data.W1 + h2 * data.W2 + h3 * data.W3) + data.Noise;
+            // 2. Determine Base Elevation from Crust
+            if (_map.Plates != null && winnerPlateId >= 0 && winnerPlateId < _map.Plates.Length)
+            {
+                // TECTONIC MODE
+                var plate = _map.Plates[winnerPlateId];
+
+                // ARCHITECTURE NOTE:
+                // This establishes the High-Res Base Layer (Plate Shape). 
+                // Final Elevation = BasePlateElevation(Subtile) + Interp(CoarseSimulationOffsets) + MicroNoise.
+
+                float baseElev = plate.IsContinental ? 200f : -4000f;
+                return baseElev + data.Noise;
+            }
+            else
+            {
+                // LEGACY / PHASE 0 MODE / INIT
+                // Fallback to blending from main tiles if Plate ID is not set yet
+                float h1 = _map.Tiles[data.Id1].Elevation;
+                float h2 = (data.Id2 != -1) ? _map.Tiles[data.Id2].Elevation : h1;
+                float h3 = (data.Id3 != -1) ? _map.Tiles[data.Id3].Elevation : h1;
+
+                return (h1 * data.W1 + h2 * data.W2 + h3 * data.W3) + data.Noise;
+            }
+        }
+
+        public void RefinePlateBoundaries(TectonicPlate[] plates, FractalNoise noiseA, float weightA, FractalNoise noiseB, float weightB, float noiseStrength, float distancePenalty)
+        {
+            if (_blendCache == null || plates == null) return;
+
+            int subtileCount = _blendCache.Length;
+
+            // Precompute Plate Centers for performance and consistency
+            // Use Exact same coordinate logic as FloodFill to match distance penalties
+            Vector3[] plateCenters = new Vector3[plates.Length];
+            for (int i = 0; i < plates.Length; i++)
+            {
+                var (lat, lon) = _map.Topology.GetTileCenter(plates[i].SeedTileId);
+                plateCenters[i] = SphericalMath.LatLonToHypersphere(lon, lat);
+            }
+
+            Parallel.For(0, subtileCount, i =>
+            {
+                // Access cache structure directly
+                int id1 = _blendCache[i].Id1;
+                int id2 = _blendCache[i].Id2;
+                int id3 = _blendCache[i].Id3;
+
+                // Get Owners
+                int o1 = _map.Tiles[id1].PlateId;
+                int o2 = (id2 != -1) ? _map.Tiles[id2].PlateId : o1;
+                int o3 = (id3 != -1) ? _map.Tiles[id3].PlateId : o1;
+
+                // Optimization: If all neighbors have same owner, no boundary.
+                if (o1 == o2 && o1 == o3)
+                {
+                    _blendCache[i].WinnerId = id1;
+                    _blendCache[i].WinnerPlateId = o1;
+                    return;
+                }
+
+                // Boundary Detected! Re-evaluate Score at Subtile Position.
+                Vector3 pos = _microTopology.GetTilePosition(i);
+
+                // Use UN-WARPED position for logical consistency with FloodFill behavior
+                Vector3 checkPos = pos;
+
+                // Calculate Scores for the 2 or 3 candidate plates
+                float bestScore = float.NegativeInfinity;
+                int bestOwnerTile = id1;
+                int bestPlateId = o1; // Default to o1
+
+                void CheckOwner(int tileId, int ownerId)
+                {
+                    if (ownerId == -1) return;
+
+                    // Same logic as PlateGenerator / FloodFill
+                    // 1. Noise Offset (Decorrelated)
+                    Vector3 plateOffset = SphericalMath.GetDecorrelatedPlateOffset(ownerId);
+
+                    // 2. Sample Noise (Use same coords as FloodFill: X, Y, Z)
+                    float n1 = noiseA.GetNoise(checkPos.X + plateOffset.X, checkPos.Y + plateOffset.Y, checkPos.Z + plateOffset.Z);
+                    // Match FloodFill offset logic exactly
+                    float n2 = noiseB.GetNoise(checkPos.X + plateOffset.X + 0.5f, checkPos.Y + plateOffset.Y + 0.5f, checkPos.Z + plateOffset.Z + 0.5f);
+
+                    float noiseVal = (n1 * weightA + n2 * weightB) * noiseStrength;
+
+                    // 3. Distance Penalty
+                    // Dist from Subtile (Unwarped) to Plate Center (Unwarped)
+                    float dist = Vector3.Distance(checkPos, plateCenters[ownerId]);
+                    float distScore = -dist * distancePenalty;
+
+                    float finalScore = noiseVal + distScore;
+
+                    if (finalScore > bestScore)
+                    {
+                        bestScore = finalScore;
+                        bestOwnerTile = tileId; // The Main Tile ID (for biome lookup)
+                        bestPlateId = ownerId;  // The TRUE Plate ID
+                    }
+                }
+
+                CheckOwner(id1, o1);
+                if (o2 != o1) CheckOwner(id2, o2);
+                if (o3 != o1 && o3 != o2) CheckOwner(id3, o3);
+
+                _blendCache[i].WinnerId = bestOwnerTile;
+                _blendCache[i].WinnerPlateId = bestPlateId;
+            });
         }
 
         public int GetSubtileId(Vector3 spherePosition)
