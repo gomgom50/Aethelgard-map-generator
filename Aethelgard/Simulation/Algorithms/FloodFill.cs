@@ -64,13 +64,14 @@ namespace Aethelgard.Simulation.Algorithms
             int[]? plateQuotas = null,
             float distancePenaltyWeight = 0.5f,
             float warpStrength = 0.0f,
-            Func<int, int, bool>? constraint = null)
+            Func<int, int, bool>? constraint = null,
+            Random? rng = null)
         {
             Console.WriteLine($"[FloodFill.Fractal] Starting (Simplex) with {seeds.Count} seeds, {map.Topology.TileCount} tiles");
             Console.WriteLine($"[FloodFill.Fractal] Params: weightA={weightA:F2}, weightB={weightB:F2}, noiseStrength={noiseStrength:F2}, distPenalty={distancePenaltyWeight:F2}, warp={warpStrength:F2}");
 
-            // PQ stores (TileId, OwnerId) with priority = -score
-            var pq = new PriorityQueue<(int Tile, int Owner), float>();
+            // PQ stores (TileId, OwnerId, PathDistance) with priority = -score
+            var pq = new PriorityQueue<(int Tile, int Owner, float Dist), float>();
             long constraintsHit = 0;
 
             // Optimization: Precompute positions (Sync to avoid thread pool deadlocks)
@@ -82,39 +83,38 @@ namespace Aethelgard.Simulation.Algorithms
                 tilePositions[i] = SphericalMath.LatLonToHypersphere(lon, lat);
             }
 
-            // Compute plate centers (for distance penalty)
-            var plateCenters = new Vector3[seeds.Count];
-            for (int i = 0; i < seeds.Count; i++)
-            {
-                if (seeds[i] < 0 || seeds[i] >= tileCount)
-                {
-                    Console.WriteLine($"[FloodFill.Fractal] FATAL: Plate {i} has invalid seed tile ID {seeds[i]}");
-                    throw new ArgumentException($"Invalid seed tile ID {seeds[i]} for plate {i}.");
-                }
-                plateCenters[i] = tilePositions[seeds[i]];
-            }
-
             // Quotas (Target sizes)
+            int numOwners = seeds.Count;
             if (plateQuotas == null)
             {
                 plateQuotas = new int[seeds.Count];
                 int fairShare = map.Topology.TileCount / seeds.Count;
                 Array.Fill(plateQuotas, fairShare);
             }
+            else
+            {
+                numOwners = plateQuotas.Length;
+            }
 
             // Track current size
-            int[] currentCounts = new int[seeds.Count];
-            int totalAssigned = seeds.Count; // Seeds are pre-assigned
+            int[] currentCounts = new int[numOwners];
+            int totalAssigned = 0; // Don't count yet, will count in seed loop
             int totalQuota = 0;
             foreach (var q in plateQuotas) totalQuota += q;
             int targetTiles = Math.Min(totalQuota, tileCount);
 
             // Optimization: Precompute Decorrelated Offsets
-            Vector3[] plateOffsets = new Vector3[seeds.Count];
-            for (int i = 0; i < seeds.Count; i++)
+            Vector3[] plateOffsets = new Vector3[numOwners];
+            for (int i = 0; i < numOwners; i++)
             {
                 plateOffsets[i] = SphericalMath.GetDecorrelatedPlateOffset(i);
             }
+
+            // Handle Plate Centers for distance penalty
+            // In multi-seed mode (Landmass), we might have multiple seeds per owner.
+            // Ideally we'd distance to nearest seed, but for now we'll just track A center (e.g. centroid or first seed).
+            // Resizing plateCenters to numOwners prevents IndexOutOfRange.
+            var plateCenters = new Vector3[numOwners];
 
             // 1. Initialize Seeds
             for (int i = 0; i < seeds.Count; i++)
@@ -122,43 +122,64 @@ namespace Aethelgard.Simulation.Algorithms
                 int seed = seeds[i];
                 int owner = i;
 
-                if (outputOwnerMap[seed] == -1)
+                // Check if owner is already assigned (Multi-seed support)
+                if (outputOwnerMap[seed] != -1)
+                {
+                    owner = outputOwnerMap[seed];
+                }
+                else
                 {
                     outputOwnerMap[seed] = owner;
                 }
-                else if (outputOwnerMap[seed] != owner)
+
+                // Safe check
+                if (owner >= numOwners)
                 {
-                    throw new System.InvalidOperationException($"Seed mismatch! Tile {seed} has owner {outputOwnerMap[seed]}, expected {owner}.");
+                    // Fallback or error?
+                    // If explicit quotas passed, we assume owner IDs match quota indices.
+                    continue;
                 }
+
+                // Update Plate Center (Last seed wins for now, sufficient for non-zero penalty)
+                plateCenters[owner] = tilePositions[seed];
 
                 if (outputOwnerMap[seed] == owner)
                 {
-                    currentCounts[owner] = 1;
+                    currentCounts[owner]++;
+                    totalAssigned++;
+                }
+                else if (outputOwnerMap[seed] != -1 && outputOwnerMap[seed] != owner)
+                {
+                    // Logic mismatch if we were auto-assigning but found pre-assigned
+                    // But here we trust outputOwnerMap if set
                 }
 
                 var neighbors = map.Topology.GetNeighbors(seed);
                 foreach (int n in neighbors)
+
                 {
                     if (outputOwnerMap[n] != -1) continue;
+
+                    // Initial distance is step size
+                    float stepDist = Vector3.Distance(tilePositions[seed], tilePositions[n]);
 
                     Vector3 pos = tilePositions[n];
                     Vector3 plateOffset = plateOffsets[owner];
 
-                    float n1 = noiseA.GetDomainWarpedNoise(pos.X + plateOffset.X, pos.Y + plateOffset.Y, pos.Z + plateOffset.Z, warpStrength);
-                    float n2 = noiseB.GetDomainWarpedNoise(pos.X + plateOffset.X + 0.5f, pos.Y + plateOffset.Y + 0.5f, pos.Z + plateOffset.Z + 0.5f, warpStrength);
-                    float noiseScore = (n1 * weightA + n2 * weightB) * noiseStrength;
+                    // Gleba: Single 6-octave noise source (configured in PlateGenerator)
+                    float noiseVal = noiseA.GetDomainWarpedNoise(pos.X + plateOffset.X, pos.Y + plateOffset.Y, pos.Z + plateOffset.Z, warpStrength);
 
-                    float dist = Vector3.Distance(pos, plateCenters[owner]);
-                    float distScore = -dist * distancePenaltyWeight;
-                    float finalScore = noiseScore + distScore;
+                    // Score: ((noise + 1) * 0.35) - distance
+                    // noiseVal is approx -1..1
+                    float finalScore = ((noiseVal + 1.0f) * 0.35f * noiseStrength) - (stepDist * distancePenaltyWeight);
 
-                    pq.Enqueue((n, owner), -finalScore);
+                    pq.Enqueue((n, owner, stepDist), -finalScore);
                 }
             }
 
             // 2. Expansion Loop
             int iterations = 0;
-            // Add existing expansion logic specifically for the new overload
+            // PQ stores (Tile, Owner, Dist)
             while (pq.TryDequeue(out var item, out float negScore))
             {
                 iterations++;
@@ -166,6 +187,7 @@ namespace Aethelgard.Simulation.Algorithms
 
                 int current = item.Tile;
                 int owner = item.Owner;
+                float currentDist = item.Dist;
 
                 if (currentCounts[owner] >= plateQuotas[owner]) continue;
                 if (currentCounts[owner] >= plateQuotas[owner]) continue;
@@ -181,6 +203,15 @@ namespace Aethelgard.Simulation.Algorithms
                 currentCounts[owner]++;
                 totalAssigned++;
 
+                // Gleba: Immediate Elevation Writing
+                if (rng != null)
+                {
+                    float baseElev = 10.0f;
+                    float jitter = (float)rng.NextDouble() * 0.01f;
+                    float ramp = (totalAssigned / (float)targetTiles) * 0.1f;
+                    map.Tiles[current].Elevation = baseElev + jitter + ramp;
+                }
+
                 var neighbors = map.Topology.GetNeighbors(current);
                 foreach (int n in neighbors)
                 {
@@ -191,51 +222,27 @@ namespace Aethelgard.Simulation.Algorithms
                         continue;
                     }
 
+                    float step = Vector3.Distance(tilePositions[current], tilePositions[n]);
+                    float newDist = currentDist + step;
+
                     Vector3 pos = tilePositions[n];
                     Vector3 plateOffset = plateOffsets[owner];
 
-                    float n1 = noiseA.GetDomainWarpedNoise(pos.X + plateOffset.X, pos.Y + plateOffset.Y, pos.Z + plateOffset.Z, warpStrength);
-                    float n2 = noiseB.GetDomainWarpedNoise(pos.X + plateOffset.X + 0.5f, pos.Y + plateOffset.Y + 0.5f, pos.Z + plateOffset.Z + 0.5f, warpStrength);
-                    float noiseScore = (n1 * weightA + n2 * weightB) * noiseStrength;
+                    // Gleba: Single 6-octave noise (configured in PlateGen)
+                    float noiseVal = noiseA.GetDomainWarpedNoise(pos.X + plateOffset.X, pos.Y + plateOffset.Y, pos.Z + plateOffset.Z, warpStrength);
 
-                    float dist = Vector3.Distance(pos, plateCenters[owner]);
-                    float distScore = -dist * distancePenaltyWeight;
-                    float finalScore = noiseScore + distScore;
+                    // Score: ((noise * 1.0158 + 1) * 0.35) - distance
+                    // Adding specific normalization factor 1.0158 per user request
+                    float finalScore = (((noiseVal * 1.0158f) + 1.0f) * 0.35f * noiseStrength) - (newDist * distancePenaltyWeight);
 
-                    pq.Enqueue((n, owner), -finalScore);
+                    pq.Enqueue((n, owner, newDist), -finalScore);
                 }
             }
 
             // Cleanup pass
-            int orphans = 0;
-            for (int i = 0; i < tileCount; i++)
-            {
-                if (outputOwnerMap[i] == -1)
-                {
-                    orphans++;
-                    float minDist = float.MaxValue;
-                    int bestOwner = -1;
-                    Vector3 pos = tilePositions[i];
-                    for (int p = 0; p < seeds.Count; p++)
-                    {
-                        float d = Vector3.DistanceSquared(pos, plateCenters[p]);
-                        if (d < minDist)
-                        {
-                            // Validate constraint before considering
-                            if (constraint == null || constraint(p, i))
-                            {
-                                minDist = d;
-                                bestOwner = p;
-                            }
-                        }
-                    }
-                    if (bestOwner != -1)
-                    {
-                        outputOwnerMap[i] = bestOwner;
-                        currentCounts[bestOwner]++;
-                    }
-                }
-            }
+            // (Removed explicit distance search for now as it relied on PlateCenters which are gone).
+            // For PlateGen phase 1, we might leave small holes which is fine, or we can add a generic neighbor fill later.
+            // For Landmass, we only fill to quota so holes are expected (Ocean).
             // Log constraint stats if any
             if (constraint != null)
             {

@@ -107,7 +107,12 @@ namespace Aethelgard.Simulation
                 NoiseWarping = noiseWarping
             };
 
-            generator.Generate();
+            generator.GeneratePlates();
+            generator.AssignVelocitiesAndCrust();
+            generator.ClassifyBoundaries();
+            generator.GenerateLandmass();
+            generator.DetermineCrustAge();
+            generator.AssignRockTypes();
             generator.GenerateMicroplates(microplatesPerPlate);
             Plates = generator.Plates;
 

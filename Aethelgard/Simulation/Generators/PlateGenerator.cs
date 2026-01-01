@@ -35,6 +35,7 @@ namespace Aethelgard.Simulation.Generators
         public float ContinentalRatio { get; set; } = 0.4f;
         public float NoiseStrength { get; set; } = 0.5f;
         public int MaxRetries { get; set; } = 10;
+        public float TargetLandFraction { get; set; } = 0.3f; // 30% Land Global Target
 
         // Noise A (Major Features / Shapes)
         public float NoiseAScale { get; set; } = 0.8f;
@@ -249,9 +250,10 @@ namespace Aethelgard.Simulation.Generators
         }
 
         /// <summary>
-        /// Runs the complete plate generation pipeline with validation and retries.
+        /// Generates the plates (Phase 1): Seeding and Flood Fill.
+        /// Does NOT run the full pipeline (Landmass, Ages, etc).
         /// </summary>
-        public void Generate()
+        public void GeneratePlates()
         {
             bool success = false;
             int attempt = 0;
@@ -298,21 +300,6 @@ namespace Aethelgard.Simulation.Generators
             {
                 Console.WriteLine("[PlateGenerator] Failed to generate valid plates after max retries. Using last attempt.");
             }
-
-            // 3. Assign velocities and crust types
-            AssignVelocitiesAndCrust();
-
-            // 4. Classify boundaries
-            ClassifyBoundaries();
-
-            // 5. Assign base elevation
-            AssignBaseElevation();
-
-            // 6. Determine crust age
-            DetermineCrustAge();
-
-            // 7. Assign rock types
-            AssignRockTypes();
         }
 
         private void ResetMapData()
@@ -425,7 +412,7 @@ namespace Aethelgard.Simulation.Generators
         /// <summary>
         /// Assigns random velocities to each plate.
         /// </summary>
-        private void AssignVelocitiesAndCrust()
+        public void AssignVelocitiesAndCrust()
         {
             for (int i = 0; i < Plates.Length; i++)
             {
@@ -444,7 +431,7 @@ namespace Aethelgard.Simulation.Generators
         /// <summary>
         /// Classifies boundary tiles as Convergent/Divergent/Transform.
         /// </summary>
-        private void ClassifyBoundaries()
+        public void ClassifyBoundaries()
         {
             for (int i = 0; i < _map.Tiles.Length; i++)
             {
@@ -537,57 +524,256 @@ namespace Aethelgard.Simulation.Generators
         /// <summary>
         /// Sets base elevation based on crust type.
         /// </summary>
-        private void AssignBaseElevation()
+        /// <summary>
+        /// Generates landmasses within plates using the Gleba-style pipeline.
+        /// Replaces simple "Continental/Oceanic" boolean with detailed crust generation.
+        /// </summary>
+        public void GenerateLandmass()
         {
-            for (int i = 0; i < _map.Tiles.Length; i++)
+            Console.WriteLine("[PlateGenerator] Generating Landmass...");
+
+            // 1. Calculate Land Quotas per Plate
+            // 1. Calculate Land Quotas per Plate (Strict Gleba Specs)
+            // Types: 0x100 (Cont bound), 0x200 (Large Island), 0x300 (Chain), 0x400 (Oceanic)
+            // Quotas: 75%, 27.5%, 4%, 1.5%
+
+            // Assign types purely for this landmass pass (round-robin or weighted)
+            // Ideally this happens in CreatePlates, but we can retro-fit here for now.
+
+            var plateLandQuotas = new int[Plates.Length];
+            int totalTiles = _map.Topology.TileCount;
+
+            // Ensure determinism in type assignment
+            var typeRng = new Random(_seed + 555);
+
+            for (int i = 0; i < Plates.Length; i++)
             {
-                int plateId = _map.Tiles[i].PlateId;
-                if (plateId < 0) continue;
+                float fraction = 0.015f; // Default Oceanic (0x400)
+                int typeId = 0x400;
 
-                // Sample noise
-                var (lat, lon) = _map.Topology.GetTileCenter(i);
-                var pos = SphericalMath.LatLonToHypersphere(lon, lat);
-
-                // Use a lower frequency noise for the "General Terrain Shape"
-                // Use a lower frequency noise for the "General Terrain Shape"
-                // Note: SimplexNoise handles internal scaling, but we can modulate typical "frequency" here
-                // For elevation, we want broad shapes.
-                float broadNoise = _noise.GetNoise(pos.X * 0.5f, pos.Y * 0.5f, pos.Z * 0.5f);
-                // Higher freq for detail
-                float detailNoise = _noise.GetNoise(pos.X * 2.0f, pos.Y * 2.0f, pos.Z * 2.0f);
-
-                bool isContinental = Plates[plateId].IsContinental;
-
-                float baseElev;
-                if (isContinental)
+                // Determine type based on previous "IsContinental" flag or Random
+                // We use the existing ContinentalRatio to decide who gets the big chunks
+                if (Plates[i].IsContinental)
                 {
-                    // Continental: 
-                    // Base ~500m
-                    // Add broad variation (+- 1000m)
-                    // Add detail (+- 200m)
-                    // Ensure it stays mostly above water but allows for lakes/lowlands
-                    baseElev = ContinentBase + (broadNoise * 800f) + (detailNoise * 200f);
-
-                    // rare chance to dip below sea level (lakes/shelves)
-                    if (baseElev < 50f && broadNoise < -0.6f) baseElev = -50f;
-
-                    _map.Tiles[i].IsLand = baseElev > 0;
-                    _map.Tiles[i].CrustThickness = 35f;
-                    _map.Tiles[i].SetFlag(TileFlags.IsContinental);
+                    // Split Continentals into "True Continental" (0x100) and "Large Island" (0x200)
+                    if (typeRng.NextDouble() > 0.3) // 70% chance of full continent
+                    {
+                        typeId = 0x100;
+                        fraction = 0.75f;
+                    }
+                    else
+                    {
+                        typeId = 0x200;
+                        fraction = 0.275f;
+                    }
                 }
                 else
                 {
-                    // Oceanic:
-                    // Base ~-4000m
-                    // Ridges/Trenches handled by boundaries later, but add general Abyssal hills
-                    baseElev = OceanBase + (broadNoise * 500f) + (detailNoise * 100f);
-
-                    _map.Tiles[i].IsLand = false;
-                    _map.Tiles[i].CrustThickness = 7f;
-                    _map.Tiles[i].SetFlag(TileFlags.IsOceanic);
+                    // Oceanic plates can be "Island Chain" (0x300) or "Oceanic" (0x400)
+                    if (typeRng.NextDouble() > 0.7) // 30% chance of chains
+                    {
+                        typeId = 0x300;
+                        fraction = 0.04f;
+                    }
+                    else
+                    {
+                        typeId = 0x400;
+                        fraction = 0.015f;
+                    }
                 }
 
-                _map.Tiles[i].Elevation = baseElev;
+                int quota = (int)(Plates[i].TileCount * fraction);
+                plateLandQuotas[i] = quota;
+
+                // Store type for future reference if needed (hacky storage in Debug flags for now?)
+                // Just log it.
+                Console.WriteLine($"  Plate {i}: Type 0x{typeId:X} Quota {quota} ({fraction * 100:F1}%)");
+            }
+
+            // 2. Select Land Seeds
+            var landSeeds = new List<int>();
+            var landOwnerMap = new int[_map.Topology.TileCount];
+            Array.Fill(landOwnerMap, -1);
+
+            for (int p = 0; p < Plates.Length; p++)
+            {
+                if (plateLandQuotas[p] <= 0) continue;
+
+                // Gleba algo implies picking specific seeds, but logic works with random internal seeds
+                // We keep 1 seed per ~150 tiles to ensure shape coverage for large quotas
+                int seedsNeeded = Math.Max(1, plateLandQuotas[p] / 150);
+                int found = 0;
+                int attempts = 0;
+
+                while (found < seedsNeeded && attempts < seedsNeeded * 20)
+                {
+                    attempts++;
+                    int tile = _rng.Next(totalTiles);
+                    if (_map.Tiles[tile].PlateId != p) continue;
+
+                    landSeeds.Add(tile);
+                    landOwnerMap[tile] = p;
+                    found++;
+                }
+            }
+            int targetLandTotal = 0;
+            foreach (var q in plateLandQuotas) targetLandTotal += q;
+            Console.WriteLine($"  Selected {landSeeds.Count} land seeds.");
+
+            // 3. Constrained Fractal Flood Fill (Generate Crust)
+            // Use FloodFill.Fractal but *constrained* to the PlateId.
+            // This fills "Land" within the "Plate".
+
+            int[] crustOwnerMap = new int[totalTiles];
+            Array.Fill(crustOwnerMap, -1);
+
+            // Constraint: Can only expand to n if n.PlateId == owner of current
+            Func<int, int, bool> crustConstraint = (ownerPlateId, targetTileId) =>
+            {
+                return _map.Tiles[targetTileId].PlateId == ownerPlateId;
+            };
+
+            // We treat "owner" in flood fill as the Plate ID.
+            // Since we might have multiple seeds for the same Plate ID, FloodFill.Fractal needs to handle that.
+            // Fortunately FloodFill.Fractal takes a list of seeds and an owner map.
+            // But if multiple seeds have same OwnerID (PlateID), they merge. That's exactly what we want.
+
+            // Setup dedicated noise for land shapes (Gleba: 6 octaves)
+            var landNoiseA = new SimplexNoise(_seed + 5000, 6, 0.5f, 2.0943951f, 1.0f);
+            var landNoiseB = new SimplexNoise(_seed + 6000, 6, 0.5f, 2.0943951f, 2.0f); // Backup/Detail (optional)
+
+            // Run Fill
+            FloodFill.Fractal(
+                _map,
+                landSeeds,
+                crustOwnerMap,
+                landNoiseA,
+                landNoiseB,
+                1.0f, 0.5f, 2.0f,
+                plateLandQuotas,
+                0.2f, // Lower distance penalty for blobby shapes
+                0.5f, // Warp
+                crustConstraint,
+                _rng
+            );
+
+            // 4. Commit Land & Base Elevation (Gleba Style)
+            // Gleba: "Initialize tiles with small positive elevation + land flag"
+            int landCount = 0;
+            for (int i = 0; i < totalTiles; i++)
+            {
+                // Reset first to Ocean defaults
+                _map.Tiles[i].IsLand = false;
+                _map.Tiles[i].Elevation = OceanBase; // -4000
+                _map.Tiles[i].SetFlag(TileFlags.IsOceanic);
+
+                if (crustOwnerMap[i] != -1)
+                {
+                    // It is "Crust" (Potential Land)
+                    // Gleba: tile.elev = 10.0 + jitter
+                    float jitter = ((float)_rng.NextDouble() * 0.01f);
+                    float baseElev = 10.0f + jitter;
+
+                    _map.Tiles[i].Elevation = baseElev;
+
+                    // Final Land Flag is determined by Elevation >= 0
+                    if (_map.Tiles[i].Elevation >= 0)
+                    {
+                        _map.Tiles[i].IsLand = true;
+                        landCount++;
+
+                        // Copy continental flag from plate
+                        int plateId = _map.Tiles[i].PlateId;
+                        if (plateId >= 0 && Plates[plateId].IsContinental)
+                            _map.Tiles[i].SetFlag(TileFlags.IsContinental);
+                        else
+                            // It's land but on oceanic plate (island)
+                            _map.Tiles[i].SetFlag(TileFlags.IsOceanic);
+                    }
+                }
+            }
+            Console.WriteLine($"  Generated {landCount} land tiles (Target: {targetLandTotal})");
+
+            // 5. Land Shaping (Coast -> Inland)
+            // Use AreaSelector to identify land regions and Stamper to raise them.
+            // Since we can have many islands, we need to select "all land" and distance-field it?
+            // Actually, Gleba suggests: "initialize_land_elevation" uses a selector.
+            // We can iterate all land tiles, find "Coast" (land with water neighbor), and BFS inwards.
+
+            ShapeLandElevation();
+        }
+
+        private void ShapeLandElevation()
+        {
+            Console.WriteLine("[PlateGenerator] Shaping Land Elevation (AreaSelector)...");
+
+            // 1. Identify "Coast" seeds (Land tiles next to Water)
+            var coastSeeds = new List<int>();
+            for (int i = 0; i < _map.Topology.TileCount; i++)
+            {
+                if (!_map.Tiles[i].IsLand) continue;
+
+                var neighborsSpan = _map.Topology.GetNeighbors(i);
+                bool isCoast = false;
+                foreach (int n in neighborsSpan)
+                {
+                    if (!_map.Tiles[n].IsLand)
+                    {
+                        isCoast = true;
+                        break;
+                    }
+                }
+
+                if (isCoast)
+                {
+                    coastSeeds.Add(i);
+                    // Explicitly set coast elevation low
+                    _map.Tiles[i].Elevation = 10f;
+                }
+            }
+
+            // 2. Use AreaSelector to grow from coast inland
+            // This computes a "Distance Field" (score) from coast
+            var selector = new Aethelgard.Simulation.Systems.Selectors.AreaSelector(_seed + 9999)
+            {
+                RequireLand = true,
+                ConstrainToPlate = false, // We want to grow across land regardless of plate (it's fused now)
+                MaxScore = 150f, // Max search depth (approx tiles inland)
+                MinStep = 1.0f,
+                MaxStep = 1.0f, // Uniform step for pure distance field
+            };
+
+            var distanceField = selector.Select(_map, coastSeeds);
+
+            // 3. Apply Elevation based on Distance
+            foreach (var kvp in distanceField)
+            {
+                int tileId = kvp.Key;
+                float distance = kvp.Value;
+
+                // If it's a seed (distance 0), we already handled it or it stays low
+                if (distance <= 0) continue;
+
+                // Gleba Formula: Elevation = (distance / 7500.0) * 250.0
+                // NOTE: 'distance' in AreaSelector is in tiles (1, 2, 3...). 
+                // If the formula assumes distance in meters (e.g. 1 tile = 10km = 10000m), we need to scale.
+                // Assuming standard "large map" logic, we scale steps by a large factor or assume formula meant 'steps / max_steps * height'.
+                // Given the explicit constants, we'll try to match the slope: 250/7500 = 1/30.
+                // So for every 30 units of distance, we gain 1 unit of height? No, that's very flat.
+                // If distance is Meters, and one tile is arguably ~5-10km on a planet scale...
+                // Let's interpret '7500' as the range in Meters where height reaches 250m.
+                // We'll treat 1 tile = 1000 "Distance Units" for now to make the gradient visible.
+
+                float distanceUnits = distance * 1000f;
+                float ramp = (distanceUnits / 7500f) * 250f;
+
+                // Add Detail Noise
+                var (lat, lon) = _map.Topology.GetTileCenter(tileId);
+                var pos = SphericalMath.LatLonToHypersphere(lon, lat);
+                float noise = _noise.GetNoise(pos.X * 5f, pos.Y * 5f, pos.Z * 5f) * 50f; // Reduced noise amplitude to not overpower the ramp
+
+                // Set Elevation
+                _map.Tiles[tileId].Elevation = 10f + ramp + noise; // Base 10f + ramp
             }
         }
 
@@ -596,7 +782,7 @@ namespace Aethelgard.Simulation.Generators
         /// <summary>
         /// Determines crust age via BFS from divergent boundaries.
         /// </summary>
-        private void DetermineCrustAge()
+        public void DetermineCrustAge()
         {
             // Find all divergent boundary tiles (age = 0)
             var divergentTiles = new List<int>();
@@ -677,7 +863,7 @@ namespace Aethelgard.Simulation.Generators
         /// <summary>
         /// Assigns initial rock types based on crust type.
         /// </summary>
-        private void AssignRockTypes()
+        public void AssignRockTypes()
         {
             for (int i = 0; i < _map.Tiles.Length; i++)
             {
