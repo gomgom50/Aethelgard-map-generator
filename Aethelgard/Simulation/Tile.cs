@@ -29,8 +29,8 @@ namespace Aethelgard.Simulation
         /// <summary>ID of the major tectonic plate owning this tile. -1 = unassigned.</summary>
         public int PlateId;
 
-        /// <summary>ID of the microplate/craton within the major plate. -1 = none.</summary>
-        public int MicroplateId;
+        /// <summary>ID of the terrane (sub-plate) within the major plate. -1 = none. Was MicroplateId.</summary>
+        public int TerraneId;
 
         /// <summary>Type of crust: 0=Oceanic, 1=Continental, 2=Transitional.</summary>
         public byte CrustType;
@@ -180,7 +180,7 @@ namespace Aethelgard.Simulation
             Elevation = 0f,
             IsLand = false,
             PlateId = -1,
-            MicroplateId = -1,
+            TerraneId = -1,
             CrustType = 0,
             CrustAge = 0f,
             CrustThickness = 7f, // Default oceanic crust thickness

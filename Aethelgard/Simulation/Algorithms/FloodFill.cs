@@ -52,6 +52,10 @@ namespace Aethelgard.Simulation.Algorithms
         /// Fractal Flood Fill for plate generation (Simplex Noise Overload).
         /// Uses SimplexNoise for organic, grid-artifact-free shapes.
         /// </summary>
+        /// <summary>
+        /// Fractal Flood Fill for plate generation (Simplex Noise Overload).
+        /// Uses SimplexNoise for organic, grid-artifact-free shapes.
+        /// </summary>
         public static void Fractal(
             WorldMap map,
             List<int> seeds,
@@ -65,16 +69,16 @@ namespace Aethelgard.Simulation.Algorithms
             float distancePenaltyWeight = 0.5f,
             float warpStrength = 0.0f,
             Func<int, int, bool>? constraint = null,
-            Random? rng = null)
+            Random? rng = null,
+            bool applyLandElevation = false) // New flag for Continental vs Oceanic
         {
             Console.WriteLine($"[FloodFill.Fractal] Starting (Simplex) with {seeds.Count} seeds, {map.Topology.TileCount} tiles");
-            Console.WriteLine($"[FloodFill.Fractal] Params: weightA={weightA:F2}, weightB={weightB:F2}, noiseStrength={noiseStrength:F2}, distPenalty={distancePenaltyWeight:F2}, warp={warpStrength:F2}");
-
             // PQ stores (TileId, OwnerId, PathDistance) with priority = -score
             var pq = new PriorityQueue<(int Tile, int Owner, float Dist), float>();
             long constraintsHit = 0;
 
             // Optimization: Precompute positions (Sync to avoid thread pool deadlocks)
+            // Use local buffer for efficiency if possible or TransientBufferPool if available (using array for now simplicity)
             int tileCount = map.Topology.TileCount;
             Vector3[] tilePositions = new Vector3[tileCount];
             for (int i = 0; i < tileCount; i++)
@@ -98,7 +102,7 @@ namespace Aethelgard.Simulation.Algorithms
 
             // Track current size
             int[] currentCounts = new int[numOwners];
-            int totalAssigned = 0; // Don't count yet, will count in seed loop
+            int totalAssigned = 0;
             int totalQuota = 0;
             foreach (var q in plateQuotas) totalQuota += q;
             int targetTiles = Math.Min(totalQuota, tileCount);
@@ -132,13 +136,7 @@ namespace Aethelgard.Simulation.Algorithms
                     outputOwnerMap[seed] = owner;
                 }
 
-                // Safe check
-                if (owner >= numOwners)
-                {
-                    // Fallback or error?
-                    // If explicit quotas passed, we assume owner IDs match quota indices.
-                    continue;
-                }
+                if (owner >= numOwners) continue; // Safety
 
                 // Update Plate Center (Last seed wins for now, sufficient for non-zero penalty)
                 plateCenters[owner] = tilePositions[seed];
@@ -148,15 +146,20 @@ namespace Aethelgard.Simulation.Algorithms
                     currentCounts[owner]++;
                     totalAssigned++;
                 }
-                else if (outputOwnerMap[seed] != -1 && outputOwnerMap[seed] != owner)
+
+                // Apply Elevation/Land to Seed if requested
+                if (applyLandElevation && rng != null)
                 {
-                    // Logic mismatch if we were auto-assigning but found pre-assigned
-                    // But here we trust outputOwnerMap if set
+                    map.Tiles[seed].IsLand = true;
+                    // Formula: 10.0 + (rand * 0.01) + (progress * 0.1)
+                    // Progress is approx 0 at start
+                    float jitter = (float)rng.NextDouble() * 0.01f;
+                    float progressRamp = 0f;
+                    map.Tiles[seed].Elevation = 10.0f + jitter + progressRamp;
                 }
 
                 var neighbors = map.Topology.GetNeighbors(seed);
                 foreach (int n in neighbors)
-
                 {
                     if (outputOwnerMap[n] != -1) continue;
 
@@ -169,27 +172,23 @@ namespace Aethelgard.Simulation.Algorithms
                     // Gleba: Single 6-octave noise source (configured in PlateGenerator)
                     float noiseVal = noiseA.GetDomainWarpedNoise(pos.X + plateOffset.X, pos.Y + plateOffset.Y, pos.Z + plateOffset.Z, warpStrength);
 
-                    // Score: ((noise + 1) * 0.35) - distance
+                    // Score: ((noise * 1.0158 + 1) * 0.35) - distance
                     // noiseVal is approx -1..1
-                    float finalScore = ((noiseVal + 1.0f) * 0.35f * noiseStrength) - (stepDist * distancePenaltyWeight);
+                    float finalScore = (((noiseVal * 1.0158f) + 1.0f) * 0.35f * noiseStrength) - (stepDist * distancePenaltyWeight);
 
                     pq.Enqueue((n, owner, stepDist), -finalScore);
                 }
             }
 
             // 2. Expansion Loop
-            int iterations = 0;
-            // PQ stores (Tile, Owner, Dist)
             while (pq.TryDequeue(out var item, out float negScore))
             {
-                iterations++;
                 if (totalAssigned >= targetTiles) break;
 
                 int current = item.Tile;
                 int owner = item.Owner;
                 float currentDist = item.Dist;
 
-                if (currentCounts[owner] >= plateQuotas[owner]) continue;
                 if (currentCounts[owner] >= plateQuotas[owner]) continue;
                 if (constraint != null && !constraint(owner, current))
                 {
@@ -203,13 +202,18 @@ namespace Aethelgard.Simulation.Algorithms
                 currentCounts[owner]++;
                 totalAssigned++;
 
-                // Gleba: Immediate Elevation Writing
-                if (rng != null)
+                // Apply Elevation/Land if requested (Continental / Island)
+                if (applyLandElevation && rng != null)
                 {
-                    float baseElev = 10.0f;
+                    map.Tiles[current].IsLand = true;
+                    // Formula: 10.0 + (rand * 0.01) + (progress * 0.1)
                     float jitter = (float)rng.NextDouble() * 0.01f;
-                    float ramp = (totalAssigned / (float)targetTiles) * 0.1f;
-                    map.Tiles[current].Elevation = baseElev + jitter + ramp;
+
+                    // Simple progress ramp: filled / target
+                    float saturatedProgress = (float)currentCounts[owner] / (float)plateQuotas[owner]; // 0..1
+                    float ramp = saturatedProgress * 0.1f; // Max 0.1m
+
+                    map.Tiles[current].Elevation = 10.0f + jitter + ramp;
                 }
 
                 var neighbors = map.Topology.GetNeighbors(current);
@@ -232,7 +236,6 @@ namespace Aethelgard.Simulation.Algorithms
                     float noiseVal = noiseA.GetDomainWarpedNoise(pos.X + plateOffset.X, pos.Y + plateOffset.Y, pos.Z + plateOffset.Z, warpStrength);
 
                     // Score: ((noise * 1.0158 + 1) * 0.35) - distance
-                    // Adding specific normalization factor 1.0158 per user request
                     float finalScore = (((noiseVal * 1.0158f) + 1.0f) * 0.35f * noiseStrength) - (newDist * distancePenaltyWeight);
 
                     pq.Enqueue((n, owner, newDist), -finalScore);
@@ -240,10 +243,6 @@ namespace Aethelgard.Simulation.Algorithms
             }
 
             // Cleanup pass
-            // (Removed explicit distance search for now as it relied on PlateCenters which are gone).
-            // For PlateGen phase 1, we might leave small holes which is fine, or we can add a generic neighbor fill later.
-            // For Landmass, we only fill to quota so holes are expected (Ocean).
-            // Log constraint stats if any
             if (constraint != null)
             {
                 Console.WriteLine($"[FloodFill.Fractal] Constraints blocked {constraintsHit} expansions.");

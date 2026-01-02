@@ -1,12 +1,14 @@
 using System.Numerics;
 using ImGuiNET;
 using Aethelgard.Simulation.Core;
+using Aethelgard.Simulation.Stages;
 
 namespace Aethelgard.UI.Panels
 {
     public class PipelinePanel
     {
         private readonly PipelineOrchestrator _orchestrator;
+        private int _selectedStageIndex = 0;
 
         public PipelinePanel(PipelineOrchestrator orchestrator)
         {
@@ -69,11 +71,12 @@ namespace Aethelgard.UI.Panels
                 ImGui.PushStyleColor(ImGuiCol.Text, color);
 
                 // Selectable item to show focus?
+                bool isSelected = (i == _selectedStageIndex);
                 string prefix = isCurrent ? "-> " : isPast ? "[Ok] " : "[  ] ";
 
-                if (ImGui.Selectable($"{prefix}{stage.Name}", isCurrent))
+                if (ImGui.Selectable($"{prefix}{stage.Name}", isSelected))
                 {
-                    // Potential click interaction
+                    _selectedStageIndex = i;
                 }
 
                 ImGui.PopStyleColor();
@@ -86,6 +89,71 @@ namespace Aethelgard.UI.Panels
                     ImGui.TextDisabled(stage.Status);
                     ImGui.Unindent();
                 }
+            }
+
+            ImGui.Separator();
+            DrawStageConfig();
+        }
+
+        private void DrawStageConfig()
+        {
+            if (_selectedStageIndex < 0 || _selectedStageIndex >= _orchestrator.Stages.Count) return;
+
+            var stage = _orchestrator.Stages[_selectedStageIndex];
+            ImGui.Text($"Configuration: {stage.Name}");
+            ImGui.SameLine();
+            ImGui.TextDisabled("(Settings match Gleba spec by default)");
+            ImGui.Separator();
+
+            if (stage is TectonicsStage ts)
+            {
+                // Basic
+                int pc = ts.PlateCount;
+                if (ImGui.SliderInt("Plate Count", ref pc, 2, 50)) ts.PlateCount = pc;
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Number of major tectonic plates.");
+
+                float cr = ts.ContinentalRatio;
+                if (ImGui.SliderFloat("Continental Ratio", ref cr, 0.0f, 1.0f)) ts.ContinentalRatio = cr;
+
+
+
+                int mpp = 3; // Fixed
+                ImGui.Text($"Microplates: {mpp}");
+
+                ImGui.Spacing();
+                ImGui.Text("Noise Settings");
+                float ns = ts.NoiseStrength;
+                if (ImGui.SliderFloat("Noise Strength (Global)", ref ns, 0.0f, 2.0f)) ts.NoiseStrength = ns;
+
+                float nas = ts.NoiseAScale;
+                if (ImGui.SliderFloat("Noise A Scale", ref nas, 0.1f, 10.0f)) ts.NoiseAScale = nas;
+
+                float nbs = ts.NoiseBScale;
+                if (ImGui.SliderFloat("Noise B Scale", ref nbs, 0.1f, 20.0f)) ts.NoiseBScale = nbs;
+
+                float nw = ts.NoiseWarping;
+                if (ImGui.SliderFloat("Noise Warping", ref nw, 0.0f, 5.0f)) ts.NoiseWarping = nw;
+
+                ImGui.Spacing();
+                ImGui.Text("Advanced Simulation Parameters");
+
+                float bvt = ts.BoundaryVotingThreshold;
+                if (ImGui.SliderFloat("Voting Threshold", ref bvt, 0.1f, 0.9f)) ts.BoundaryVotingThreshold = bvt;
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Percentage of neighbor votes needed to classify a boundary (Default: 0.525).");
+
+                float cas = ts.CrustAgeSpread;
+                if (ImGui.SliderFloat("Crust Age Spread", ref cas, 0.1f, 10.0f)) ts.CrustAgeSpread = cas;
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("How fast crust ages with distance from divergent boundary.");
+
+
+
+                float cbr = ts.CoastalBoostRange;
+                if (ImGui.DragFloat("Coastal Boost Range", ref cbr, 10f, 100f, 20000f)) ts.CoastalBoostRange = cbr;
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Distance inland affected by coastal elevation boost.");
+
+                float cbh = ts.CoastalBoostHeight;
+                if (ImGui.DragFloat("Coastal Boost Height", ref cbh, 1f, 0f, 2000f)) ts.CoastalBoostHeight = cbh;
+                if (ImGui.IsItemHovered()) ImGui.SetTooltip("Maximum elevation added at coastlines.");
             }
         }
     }

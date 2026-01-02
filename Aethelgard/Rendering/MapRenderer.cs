@@ -467,7 +467,7 @@ namespace Aethelgard.Rendering
                 RenderMode.CrustType => tile.CrustType == 1 ? new Color(180, 140, 100, 255) : new Color(40, 80, 140, 255),
                 RenderMode.RockType => GetColorForRockType(tile.RockType),
                 RenderMode.PlateNoise => GetColorForPlateNoise(tile.DebugValue),
-                RenderMode.Microplates => GetColorForMicroplateId(tile.MicroplateId),
+                RenderMode.Microplates => GetColorForMicroplateId(tile.TerraneId),
                 _ => Color.Magenta
             };
         }

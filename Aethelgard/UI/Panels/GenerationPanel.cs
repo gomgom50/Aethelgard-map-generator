@@ -22,8 +22,7 @@ namespace Aethelgard.UI.Panels
             float contRatio = _tectonicsStage.ContinentalRatio;
             if (ImGui.SliderFloat("Continental Ratio", ref contRatio, 0.1f, 0.9f, "%.2f")) _tectonicsStage.ContinentalRatio = contRatio;
 
-            float landTarget = _tectonicsStage.TargetLandFraction;
-            if (ImGui.SliderFloat("Target Land %", ref landTarget, 0.05f, 0.95f, "%.2f")) _tectonicsStage.TargetLandFraction = landTarget;
+
 
             float noiseStr = _tectonicsStage.NoiseStrength;
             if (ImGui.SliderFloat("Noise Strength", ref noiseStr, 0.1f, 50.0f, "%.1f")) _tectonicsStage.NoiseStrength = noiseStr;
@@ -57,9 +56,9 @@ namespace Aethelgard.UI.Panels
 
             ImGui.Separator();
 
-            float microStr = _tectonicsStage.MicroplatesPerPlate;
+            float microStr = 3f; // Fixed
             int mp = (int)microStr;
-            if (ImGui.SliderInt("Microplates/Plate", ref mp, 0, 10)) _tectonicsStage.MicroplatesPerPlate = mp;
+            ImGui.Text($"Microplates: {mp} (Auto)");
         }
     }
 }

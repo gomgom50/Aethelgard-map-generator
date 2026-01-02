@@ -108,12 +108,12 @@ namespace Aethelgard.Simulation
             };
 
             generator.GeneratePlates();
-            generator.AssignVelocitiesAndCrust();
-            generator.ClassifyBoundaries();
-            generator.GenerateLandmass();
-            generator.DetermineCrustAge();
-            generator.AssignRockTypes();
             generator.GenerateMicroplates(microplatesPerPlate);
+            generator.AssignVelocitiesAndDirections();
+            generator.ClassifyBoundaries();
+            generator.DetermineCrustAge(); // Explicit call
+            generator.InitializeTileCrust(); // Was AssignRockTypes
+            generator.InitializeLandElevation(); // Was GenerateLandmass
             Plates = generator.Plates;
 
             // Step 2: Refine Boundaries using Subtile System (High Resolution)

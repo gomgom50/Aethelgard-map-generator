@@ -21,7 +21,7 @@ namespace Aethelgard.Simulation.Stages
         // Configuration Parameters (Bound to UI)
         public int PlateCount { get; set; } = 12;
         public float ContinentalRatio { get; set; } = 0.4f;
-        public float TargetLandFraction { get; set; } = 0.3f;
+
         public float NoiseStrength { get; set; } = 0.5f;
 
         // Noise Stack A (Base)
@@ -38,7 +38,14 @@ namespace Aethelgard.Simulation.Stages
 
         public float DistancePenalty { get; set; } = 0.4f;
         public float NoiseWarping { get; set; } = 2.0f;
-        public int MicroplatesPerPlate { get; set; } = 3;
+
+
+        // Advanced Config
+        public float BoundaryVotingThreshold { get; set; } = 0.525f;
+        public float CrustAgeSpread { get; set; } = 2.5f;
+
+        public float CoastalBoostRange { get; set; } = 7500f;
+        public float CoastalBoostHeight { get; set; } = 250f;
 
         public void Execute(WorldMap map, ConstraintManager constraints)
         {
@@ -53,7 +60,7 @@ namespace Aethelgard.Simulation.Stages
             // Apply configuration
             generator.PlateCount = PlateCount;
             generator.ContinentalRatio = ContinentalRatio;
-            generator.TargetLandFraction = TargetLandFraction;
+
             generator.NoiseStrength = NoiseStrength;
 
             generator.NoiseAScale = NoiseAScale;
@@ -69,35 +76,41 @@ namespace Aethelgard.Simulation.Stages
             generator.DistancePenalty = DistancePenalty;
             generator.NoiseWarping = NoiseWarping;
 
-            // Run Generation
-            _status = "Generating Plates (Seeding & Flooding)";
+            // Advanced Config
+            generator.BoundaryVotingThreshold = BoundaryVotingThreshold;
+            generator.CrustAgeSpread = CrustAgeSpread;
+
+            generator.CoastalBoostRange = CoastalBoostRange;
+            generator.CoastalBoostHeight = CoastalBoostHeight;
+
+            // Run Generation (Manual Staged Pipeline as per Design Doc)
+
+            // Phase 1: Major Plates
+            _status = "Generating Major Plates";
             _progress = 0.1f;
-            generator.GeneratePlates(); // Validates, Floods...
+            generator.GeneratePlates();
 
-            _status = "Assigning Velocities";
+            // Phase 2: Terranes
+            _status = "Generating Microplates";
             _progress = 0.3f;
-            generator.AssignVelocitiesAndCrust();
+            generator.GenerateMicroplates(0); // param ignored
 
-            _status = "Classifying Boundaries";
-            _progress = 0.4f;
-            generator.ClassifyBoundaries();
-
-            _status = "Generating Landmass (Gleba Fractal Fill)";
+            // Phase 3: Velocities & Boundaries
+            _status = "Assigning Velocities & Heads";
             _progress = 0.5f;
-            generator.GenerateLandmass();
-
-            _status = "Determining Crust Age";
-            _progress = 0.7f;
+            generator.AssignVelocitiesAndDirections();
+            generator.ClassifyBoundaries();
             generator.DetermineCrustAge();
 
-            _status = "Assigning Rock Types";
-            _progress = 0.8f;
-            generator.AssignRockTypes();
+            // Phase 4: Crust Type
+            _status = "Initializing Crust Types";
+            _progress = 0.7f;
+            generator.InitializeTileCrust();
 
-
-            _status = "Generating Microplates";
-            _progress = 0.8f;
-            generator.GenerateMicroplates(MicroplatesPerPlate);
+            // Phase 5: Land Elevation
+            _status = "Generating Land Elevation";
+            _progress = 0.9f;
+            generator.InitializeLandElevation();
 
             _status = "Complete";
             _progress = 1.0f;
